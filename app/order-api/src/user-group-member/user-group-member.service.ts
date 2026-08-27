@@ -30,7 +30,12 @@ import { AppPaginatedResponseDto } from 'src/app/app.dto';
 import {
   attachCreatedByForArrayEntity,
   attachCreatedByForSingleEntity,
+  batchLookupSharedUserIdentities,
+  mergeSharedUserIdentityInto,
+  GENERAL_IDENTITY_FIELDS,
+  FULL_IDENTITY_FIELDS,
 } from 'src/user/user.helper';
+import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
 
 @Injectable()
 export class UserGroupMemberService {
@@ -45,6 +50,7 @@ export class UserGroupMemberService {
     @Inject(WINSTON_MODULE_NEST_PROVIDER)
     private readonly logger: Logger,
     private readonly transactionService: TransactionManagerService,
+    private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {}
 
   async addUserToGroup(
@@ -184,6 +190,7 @@ export class UserGroupMemberService {
   async findAll(
     query: GetUserGroupMemberQuery,
   ): Promise<AppPaginatedResponseDto<UserGroupMemberResponseDto>> {
+    const context = `${UserGroupMemberService.name}.${this.findAll.name}`;
     // Construct where options
     const whereOptions: FindOptionsWhere<UserGroupMember> = {
       userGroup: {
@@ -232,6 +239,34 @@ export class UserGroupMemberService {
       this.userRepository,
     );
 
+    const identityById = await batchLookupSharedUserIdentities(
+      [
+        ...userGroupMembersWithUser.map(
+          (member) => member.createdBy?.sharedUserId,
+        ),
+        ...userGroupMembersWithUser.map((member) => member.user?.sharedUserId),
+      ],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    userGroupMembersWithUser.forEach((member) => {
+      if (member.createdBy) {
+        mergeSharedUserIdentityInto(
+          member.createdBy,
+          identityById.get(member.createdBy.sharedUserId),
+          GENERAL_IDENTITY_FIELDS,
+        );
+      }
+      if (member.user) {
+        mergeSharedUserIdentityInto(
+          member.user,
+          identityById.get(member.user.sharedUserId),
+          FULL_IDENTITY_FIELDS,
+        );
+      }
+    });
+
     return {
       hasNext: hasNext,
       hasPrevios: hasPrevious,
@@ -265,6 +300,30 @@ export class UserGroupMemberService {
       member,
       this.userRepository,
     );
+
+    const identityById = await batchLookupSharedUserIdentities(
+      [
+        memberWithUser.createdBy?.sharedUserId,
+        memberWithUser.user?.sharedUserId,
+      ],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    if (memberWithUser.createdBy) {
+      mergeSharedUserIdentityInto(
+        memberWithUser.createdBy,
+        identityById.get(memberWithUser.createdBy.sharedUserId),
+        GENERAL_IDENTITY_FIELDS,
+      );
+    }
+    if (memberWithUser.user) {
+      mergeSharedUserIdentityInto(
+        memberWithUser.user,
+        identityById.get(memberWithUser.user.sharedUserId),
+        FULL_IDENTITY_FIELDS,
+      );
+    }
 
     return this.mapper.map(
       memberWithUser,

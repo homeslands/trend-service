@@ -49,6 +49,7 @@ export class InvoiceAreaResponseDto extends BaseResponseDto {
   @ApiProperty({
     description: 'The branch of invoice area',
     example: 'Branch',
+    type: () => BranchResponseDto,
   })
   branch: BranchResponseDto;
 }
