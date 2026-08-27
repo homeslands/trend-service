@@ -168,6 +168,6 @@ export class MenuResponseDto {
   isTemplate: boolean;
 
   @AutoMap(() => BranchResponseDto)
-  @ApiProperty()
+  @ApiProperty({ type: () => BranchResponseDto })
   branch: BranchResponseDto;
 }

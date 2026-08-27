@@ -10,17 +10,17 @@ const accountRevenueFromWhereClause = (
   options: AccountRevenueClauseOptions,
 ) => `
     FROM
-        order_db.order_tbl AS o
+        order_tbl AS o
     INNER JOIN
-        order_db.payment_tbl AS p ON o.payment_column = p.id_column
+        payment_tbl AS p ON o.payment_column = p.id_column
     INNER JOIN
-        order_db.user_tbl AS u ON o.owner_column = u.id_column
+        user_tbl AS u ON o.owner_column = u.id_column
     INNER JOIN
-        order_db.role_tbl AS r ON u.role_column = r.id_column
+        role_tbl AS r ON u.role_column = r.id_column
     LEFT JOIN
-        order_db.user_tbl AS au ON o.approval_by_column = au.id_column
+        user_tbl AS au ON o.approval_by_column = au.id_column
     LEFT JOIN
-        order_db.role_tbl AS ar ON au.role_column = ar.id_column
+        role_tbl AS ar ON au.role_column = ar.id_column
     WHERE
         o.branch_column = ?
     AND
@@ -131,6 +131,7 @@ export const getAccountRevenueClause = (
     SELECT
         u.slug_column AS customerSlug,
         TRIM(CONCAT(COALESCE(u.first_name_column, ''), ' ', COALESCE(u.last_name_column, ''))) AS customerName,
+        u.shared_user_id_column AS customerSharedUserId,
         u.created_at_column AS customerRegisteredAt,
         SUM(p.amount_column) AS totalAmount,${accountRevenuePaymentMethodSums}
     ${accountRevenueFromWhereClause(options)}

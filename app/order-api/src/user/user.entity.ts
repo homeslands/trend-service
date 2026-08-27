@@ -34,8 +34,21 @@ export class User extends Base {
   @Column({ name: 'phonenumber_column', unique: true })
   phonenumber: string;
 
-  @Column({ name: 'password_column' })
-  password: string;
+  // Id that cua user ben shared-user (identity service) - dung de JwtStrategy
+  // map JWT payload.sub sang user cuc bo cua trend. Voi hang cu (truoc khi
+  // tach shared-user), migration backfill tam bang chinh id_column cua hang
+  // (khong phai id that) - se duoc dong bo lai sau; hang moi tro di (tao qua
+  // UserService.updateUserRole) luon duoc gan dung id that ngay tu dau. Luon
+  // co gia tri (NOT NULL tu sau migration backfill).
+  @AutoMap()
+  @Column({ name: 'shared_user_id_column', unique: true })
+  sharedUserId: string;
+
+  // Nullable vi user duoc tao qua gan role (updateUserRole) khong con di qua
+  // flow tao user + mat khau cuc bo nua. TODO: xoa cot nay khi don xong
+  // change-password/forgot-password o auth module (ngoai pham vi lan nay).
+  @Column({ name: 'password_column', nullable: true })
+  password?: string;
 
   @Column({ name: 'first_name_column', nullable: true })
   @AutoMap()
