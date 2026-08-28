@@ -100,10 +100,7 @@ export class UserController {
     RoleEnum.SuperAdmin,
   )
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({
-    summary:
-      'Create user: trend sets role/branch, then saves identity on shared-user',
-  })
+  @ApiOperation({ summary: 'Create user' })
   @ApiResponseWithType({
     status: HttpStatus.CREATED,
     description: 'User has been created successfully',
@@ -112,8 +109,13 @@ export class UserController {
   async createUser(
     @Body(new ValidationPipe({ transform: true }))
     requestData: CreateUserRequestDto,
+    @CurrentUser(new ValidationPipe({ validateCustomDecorators: true }))
+    user: CurrentUserDto,
   ): Promise<AppResponseDto<UserResponseDto>> {
-    const result = await this.userService.createUser(requestData);
+    const result = await this.userService.createUser(
+      requestData,
+      user?.scope?.role,
+    );
     return {
       message: 'User has been created successfully',
       statusCode: HttpStatus.CREATED,
@@ -122,23 +124,41 @@ export class UserController {
     } as AppResponseDto<UserResponseDto>;
   }
 
-  @Post('role')
+  @Post(':slug/reset-password')
   @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary:
-      'Assign a trend role to a shared-user account (looked up by phonenumber)',
+  @ApiOperation({ summary: 'Reset pwd' })
+  @ApiResponseWithType({
+    status: HttpStatus.OK,
+    description: 'User password has been reset successfully',
+    type: UserResponseDto,
   })
+  async resetPassword(
+    @Param('slug') slug: string,
+  ): Promise<AppResponseDto<UserResponseDto>> {
+    await this.userService.resetPassword(slug);
+    return {
+      message: 'User password has been reset successfully',
+      statusCode: HttpStatus.OK,
+      timestamp: new Date().toISOString(),
+    } as AppResponseDto<UserResponseDto>;
+  }
+
+  @Post(':slug/role')
+  @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update user role' })
   @ApiResponseWithType({
     status: HttpStatus.OK,
     description: 'User role have been updated successfully',
     type: UserResponseDto,
   })
   async updateUserRole(
+    @Param('slug') slug: string,
     @Body(new ValidationPipe({ transform: true }))
     requestData: UpdateUserRoleRequestDto,
   ) {
-    const result = await this.userService.updateUserRole(requestData);
+    const result = await this.userService.updateUserRole(slug, requestData);
     return {
       message: 'User role has been updated successfully',
       statusCode: HttpStatus.OK,
@@ -304,10 +324,26 @@ export class UserController {
     } as AppResponseDto<UserResponseDto>;
   }
 
-  // toggle-active da bi xoa khoi trend - khoa/mo khoa tai khoan gio quy het
-  // ve shared-user (client goi thang PATCH /user/:slug/toggle-active ben
-  // do), vi trend khong con giu ban isActive cua rieng no nua (xem
-  // architect-http.md muc 1.1, issuses/sync-user-data-with-role.md).
+  @Patch(':slug/toggle-active')
+  @HasRoles(RoleEnum.SuperAdmin, RoleEnum.Admin, RoleEnum.Manager)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Toggle user active status' })
+  @ApiResponseWithType({
+    status: HttpStatus.OK,
+    description: 'User active status has been toggled successfully',
+    type: UserResponseDto,
+  })
+  async toggleActiveUser(
+    @Param('slug') slug: string,
+  ): Promise<AppResponseDto<UserResponseDto>> {
+    const result = await this.userService.toggleActiveUser(slug);
+    return {
+      message: 'User active status has been toggled successfully',
+      statusCode: HttpStatus.OK,
+      timestamp: new Date().toISOString(),
+      result,
+    } as AppResponseDto<UserResponseDto>;
+  }
 
   @Patch(':slug/language')
   @HttpCode(HttpStatus.OK)

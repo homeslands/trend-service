@@ -15,7 +15,6 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { DistributeLockJobKey, QueueRegisterKey } from 'src/app/app.constants';
 import Redlock from 'redlock';
-import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
 
 @Injectable()
 export class UserScheduler {
@@ -31,7 +30,6 @@ export class UserScheduler {
     private readonly campaignService: CampaignService,
     @InjectQueue(QueueRegisterKey.DISTRIBUTE_LOCK_JOB)
     private readonly distributeLockJobQueue: Queue,
-    private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {
     this.saltOfRounds = this.configService.get<number>('SALT_ROUNDS');
   }
@@ -296,106 +294,6 @@ export class UserScheduler {
         context,
       );
       return;
-    }
-  }
-
-  // Bu cho khoang tre cua lazy load thuan (JwtStrategy.createLocalUserWithDefaultRole,
-  // UserService.updateUserRole): khach da dang ky ben shared-user nhung chua
-  // tung dang nhap/duoc gan role o trend thi khong co row cuc bo, bi "mat
-  // trang" khoi GET /user/statistics. Job nay pull user tao trong ngay hom
-  // truoc tu shared-user roi tu tao row lazy (role Customer mac dinh) cho
-  // nhung ai chua co, giu dung createdAt that. Xem
-  // issuses/sync-user-data-with-role.md muc 6.
-  @Cron(CronExpression.EVERY_DAY_AT_2AM)
-  async syncRecentlyRegisteredUsers() {
-    const context = `${UserScheduler.name}.${this.syncRecentlyRegisteredUsers.name}`;
-
-    // Nhieu replica cung chay job nay - chi 1 replica duoc thuc thi trong
-    // ngay hom do, tranh goi trung sang shared-user va race khi tao row.
-    const client = await this.distributeLockJobQueue.client;
-    const redlock = new Redlock([client]);
-    const key = DistributeLockJobKey.SYNC_RECENTLY_REGISTERED_USERS;
-    const ttl = 1000 * 60 * 5; // 5 minutes
-    let lock: any = null;
-
-    try {
-      lock = await redlock.acquire([key], ttl);
-    } catch {
-      this.logger.log(
-        `Another replica is already running sync recently registered users, skip`,
-        context,
-      );
-      return;
-    }
-
-    try {
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
-      const yesterdayStart = new Date(todayStart);
-      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-
-      this.logger.log(
-        `Sync users registered from ${yesterdayStart.toISOString()} to ${todayStart.toISOString()}`,
-        context,
-      );
-
-      const recentSharedUsers = await this.sharedUserServiceClient.listRecent(
-        yesterdayStart,
-        todayStart,
-      );
-
-      if (!recentSharedUsers.length) {
-        this.logger.log(`Found 0 recently registered user, skip`, context);
-        return;
-      }
-
-      const customerRole = await this.roleRepository.findOne({
-        where: { name: RoleEnum.Customer },
-      });
-      if (!customerRole) {
-        this.logger.warn(`Role ${RoleEnum.Customer} not found`, context);
-        return;
-      }
-
-      let created = 0;
-      for (const sharedUser of recentSharedUsers) {
-        const existed = await this.userRepository.exists({
-          where: { sharedUserId: sharedUser.id },
-        });
-        if (existed) continue;
-
-        try {
-          const newUser = this.userRepository.create({
-            sharedUserId: sharedUser.id,
-            phonenumber: sharedUser.phonenumber,
-            role: customerRole,
-            createdAt: new Date(sharedUser.createdAt),
-          });
-          await this.userRepository.save(newUser);
-          created++;
-        } catch (error) {
-          // Race voi lazy load (JwtStrategy) chay dung luc user tu dang
-          // nhap - khong coi la loi, chi bo qua (row da duoc tao boi phia
-          // kia).
-          this.logger.warn(
-            `Insert local user raced or failed for sharedUserId=${sharedUser.id}: ${error.message}`,
-            context,
-          );
-        }
-      }
-
-      this.logger.log(
-        `Synced ${created}/${recentSharedUsers.length} recently registered user(s)`,
-        context,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Error when syncing recently registered users`,
-        error.stack,
-        context,
-      );
-    } finally {
-      await lock.release();
     }
   }
 }

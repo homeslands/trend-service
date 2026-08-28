@@ -7,6 +7,9 @@ export const INVALID_FIRSTNAME = 'INVALID_FIRSTNAME';
 export const INVALID_LASTNAME = 'INVALID_LASTNAME';
 export const USER_EXISTS = 'USER_EXISTS';
 export const USER_NOT_FOUND = 'USER_NOT_FOUND';
+export const INVALID_OLD_PASSWORD = 'INVALID_OLD_PASSWORD';
+export const FORGOT_TOKEN_EXPIRED = 'FORGOT_TOKEN_EXPIRED';
+export const FORGOT_TOKEN_EXISTS = 'FORGOT_TOKEN_EXISTS';
 export const INVALID_CREDENTIALS = 'INVALID_CREDENTIALS';
 export const ERROR_UPDATE_USER = 'ERROR_UPDATE_USER';
 export const INVALID_EMAIL = 'INVALID_EMAIL';
@@ -23,6 +26,8 @@ export const CONFIRM_EMAIL_VERIFICATION_ERROR =
 export const THIS_EMAIL_ALREADY_VERIFY = 'THIS_EMAIL_ALREADY_VERIFY';
 export const ERROR_REGISTER_USER = 'ERROR_REGISTER_USER';
 export const ERROR_UPDATE_PASSWORD = 'ERROR_UPDATE_PASSWORD';
+export const ERROR_CREATE_FORGOT_PASSWORD_TOKEN =
+  'ERROR_CREATE_FORGOT_PASSWORD_TOKEN';
 export const USER_ALREADY_VERIFIED_EMAIL = 'USER_ALREADY_VERIFIED_EMAIL';
 export const USER_ALREADY_VERIFIED_PHONENUMBER =
   'USER_ALREADY_VERIFIED_PHONENUMBER';
@@ -41,6 +46,10 @@ export const CONFIRM_PHONE_NUMBER_VERIFICATION_ERROR =
 export const USER_NOT_ACTIVE = 'USER_NOT_ACTIVE';
 export const USER_NOT_VERIFIED_EMAIL = 'USER_NOT_VERIFIED_EMAIL';
 export const USER_NOT_VERIFIED_PHONENUMBER = 'USER_NOT_VERIFIED_PHONENUMBER';
+export const ERROR_CREATE_TOKEN_TO_CHANGE_PASSWORD =
+  'ERROR_CREATE_TOKEN_TO_CHANGE_PASSWORD';
+export const ERROR_CHANGE_FORGOT_PASSWORD = 'ERROR_CHANGE_FORGOT_PASSWORD';
+export const FORGOT_TOKEN_NOT_EXISTED = 'FORGOT_TOKEN_NOT_EXISTED';
 export const NEED_UPDATE_PASSWORD = 'NEED_UPDATE_PASSWORD';
 export const NEED_UPDATE_PHONE_NUMBER = 'NEED_UPDATE_PHONE_NUMBER';
 export const PHONE_NUMBER_ALREADY_EXISTS = 'PHONE_NUMBER_ALREADY_EXISTS';
@@ -50,6 +59,7 @@ export const USER_NOT_HAVE_ANY_REQUIREMENT_MUST_BE_COMPLETED =
   'USER_NOT_HAVE_ANY_REQUIREMENT_MUST_BE_COMPLETED';
 export const USER_NOT_HAVE_BLOCKED_PHONE_NUMBER_REQUIREMENT =
   'USER_NOT_HAVE_BLOCKED_PHONE_NUMBER_REQUIREMENT';
+export const ERROR_DELETE_ACCOUNT = 'ERROR_DELETE_ACCOUNT';
 export const REGISTER_OTP_TOKEN_ALREADY_EXISTS =
   'REGISTER_OTP_TOKEN_ALREADY_EXISTS';
 export const REGISTER_OTP_TOKEN_NOT_FOUND = 'REGISTER_OTP_TOKEN_NOT_FOUND';
@@ -67,7 +77,10 @@ export type TAuthErrorCodeKey =
   | typeof INVALID_USERID
   | typeof USER_EXISTS
   | typeof USER_NOT_FOUND
+  | typeof INVALID_OLD_PASSWORD
+  | typeof FORGOT_TOKEN_EXPIRED
   | typeof INVALID_CREDENTIALS
+  | typeof FORGOT_TOKEN_EXISTS
   | typeof ERROR_UPDATE_USER
   | typeof INVALID_EMAIL
   | typeof INVALID_ADDRESS
@@ -81,6 +94,7 @@ export type TAuthErrorCodeKey =
   | typeof THIS_EMAIL_ALREADY_VERIFY
   | typeof ERROR_REGISTER_USER
   | typeof ERROR_UPDATE_PASSWORD
+  | typeof ERROR_CREATE_FORGOT_PASSWORD_TOKEN
   | typeof INVALID_FIRSTNAME
   | typeof USER_ALREADY_VERIFIED_EMAIL
   | typeof USER_ALREADY_VERIFIED_PHONENUMBER
@@ -93,12 +107,16 @@ export type TAuthErrorCodeKey =
   | typeof USER_NOT_ACTIVE
   | typeof USER_NOT_VERIFIED_EMAIL
   | typeof USER_NOT_VERIFIED_PHONENUMBER
+  | typeof ERROR_CREATE_TOKEN_TO_CHANGE_PASSWORD
+  | typeof ERROR_CHANGE_FORGOT_PASSWORD
+  | typeof FORGOT_TOKEN_NOT_EXISTED
   | typeof NEED_UPDATE_PASSWORD
   | typeof NEED_UPDATE_PHONE_NUMBER
   | typeof PHONE_NUMBER_ALREADY_EXISTS
   | typeof ERROR_COMPLETE_USER_REGISTRATION
   | typeof USER_NOT_HAVE_ANY_REQUIREMENT_MUST_BE_COMPLETED
   | typeof USER_NOT_HAVE_BLOCKED_PHONE_NUMBER_REQUIREMENT
+  | typeof ERROR_DELETE_ACCOUNT
   | typeof REGISTER_OTP_TOKEN_ALREADY_EXISTS
   | typeof REGISTER_OTP_TOKEN_NOT_FOUND
   | typeof REGISTER_OTP_TOKEN_EXPIRED
@@ -118,6 +136,9 @@ export const AuthValidation: TAuthErrorCode = {
   INVALID_USERID: createErrorCode(119004, 'User ID is required'),
   USER_EXISTS: createErrorCode(119005, 'User exist'),
   USER_NOT_FOUND: createErrorCode(119006, 'User not found'),
+  INVALID_OLD_PASSWORD: createErrorCode(119007, 'Invalid old password'),
+  FORGOT_TOKEN_EXPIRED: createErrorCode(119008, 'Forgot token is expired'),
+  FORGOT_TOKEN_EXISTS: createErrorCode(119009, 'Forgot token exists'),
   INVALID_CREDENTIALS: createErrorCode(119010, 'Invalid credentials'),
   ERROR_UPDATE_USER: createErrorCode(119011, 'Error when updating user'),
   INVALID_EMAIL: createErrorCode(119012, 'Invalid email'),
@@ -149,6 +170,10 @@ export const AuthValidation: TAuthErrorCode = {
   ERROR_UPDATE_PASSWORD: createErrorCode(
     119023,
     'Error when updating password',
+  ),
+  ERROR_CREATE_FORGOT_PASSWORD_TOKEN: createErrorCode(
+    119024,
+    'Error when creating forgot password token',
   ),
   USER_ALREADY_VERIFIED_EMAIL: createErrorCode(
     119025,
@@ -188,6 +213,15 @@ export const AuthValidation: TAuthErrorCode = {
     119035,
     'User not verified phone number',
   ),
+  ERROR_CREATE_TOKEN_TO_CHANGE_PASSWORD: createErrorCode(
+    119036,
+    'Error when create token to change password',
+  ),
+  ERROR_CHANGE_FORGOT_PASSWORD: createErrorCode(
+    119037,
+    'Error when change forgot password',
+  ),
+  FORGOT_TOKEN_NOT_EXISTED: createErrorCode(119038, 'Forgot token not existed'),
   NEED_UPDATE_PASSWORD: createErrorCode(119039, 'Need update password'),
   NEED_UPDATE_PHONE_NUMBER: createErrorCode(119040, 'Need update phone number'),
   PHONE_NUMBER_ALREADY_EXISTS: createErrorCode(
@@ -206,6 +240,7 @@ export const AuthValidation: TAuthErrorCode = {
     119044,
     'User not have blocked phone number requirement',
   ),
+  ERROR_DELETE_ACCOUNT: createErrorCode(119045, 'Error when deleting account'),
   REGISTER_OTP_TOKEN_ALREADY_EXISTS: createErrorCode(
     119046,
     'Register OTP token already exists, please wait for it to expire',

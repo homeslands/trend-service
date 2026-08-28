@@ -16,5 +16,4 @@ export enum DistributeLockJobKey {
   GENERATE_MENU_EVERY_DAY_AT_1AM = 'generate-menu-every-day-at-1am',
   REFRESH_PRODUCT_ANALYSIS = 'refresh-product-analysis',
   SEND_BIRTHDAY_EVERY_DAY_AT_1AM = 'send-birthday-every-day-at-1am',
-  SYNC_RECENTLY_REGISTERED_USERS = 'sync-recently-registered-users',
 }

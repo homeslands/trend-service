@@ -7,13 +7,11 @@ import { User } from 'src/user/user.entity';
 import { UserGroup } from 'src/user-group/user-group.entity';
 import { UserGroupMember } from './user-group-member.entity';
 import { DbModule } from 'src/db/db.module';
-import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([UserGroupMember, User, UserGroup]),
     DbModule,
-    SharedUserServiceModule,
   ],
   controllers: [UserGroupMemberController],
   providers: [UserGroupMemberService, UserGroupMemberProfile],

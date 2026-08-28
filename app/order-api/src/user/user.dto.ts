@@ -68,14 +68,8 @@ export class CreateUserRequestDto {
 }
 
 export class UserScopeDto {
-  @ApiProperty()
   role: string;
-
-  @ApiProperty({ type: [String] })
   permissions: string[];
-
-  @ApiProperty({ type: () => BranchResponseDto, nullable: true })
-  branch: BranchResponseDto | null;
 }
 
 export class CurrentUserDto {
@@ -161,10 +155,6 @@ export class GeneralUserResponseDto extends BaseResponseDto {
 }
 
 export class UpdateUserRoleRequestDto {
-  @ApiProperty()
-  @IsNotEmpty({ message: INVALID_PHONENUMBER })
-  phonenumber: string;
-
   @ApiProperty()
   @IsNotEmpty()
   role: string;
@@ -557,12 +547,6 @@ export class AccountRevenueQueryResponseDto {
 
   @AutoMap()
   customerName: string;
-
-  // Dung de ghep identity moi nhat tu shared-user thay cho customerName (co
-  // the la ban cuc bo cu) - khong expose ra AccountRevenueCustomerResponseDto,
-  // chi la key trung gian (architect-http.md muc 1.1 quy tac 4).
-  @AutoMap()
-  customerSharedUserId: string;
 
   @AutoMap()
   customerRegisteredAt: Date;

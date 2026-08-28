@@ -21,7 +21,6 @@ import { QueueRegisterKey } from 'src/app/app.constants';
 import { UserBirthdayProducer } from './user-birthday.producer';
 import { UserBirthdayConsumer } from './user-birthday.consumer';
 import { CampaignModule } from 'src/campaign/campaign.module';
-import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
 
 @Module({
   imports: [
@@ -37,7 +36,6 @@ import { SharedUserServiceModule } from 'src/external-services/shared-user-servi
     SharedModule,
     ZaloOaConnectorModule,
     CampaignModule,
-    SharedUserServiceModule,
     BullModule.registerQueue({
       name: QueueRegisterKey.USER_BIRTHDAY,
     }),
