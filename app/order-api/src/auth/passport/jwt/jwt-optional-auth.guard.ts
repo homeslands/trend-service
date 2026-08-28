@@ -38,7 +38,7 @@ export class JwtOptionalAuthGuard extends AuthGuard('jwt') {
   // - token success => return user
   // **errorUser = {
   //   userId: null,
-  //   scope: { role: null, permissions: [] },
+  //   scope: { role: null, permissions: [], branch: null },
   // }
   handleRequest(err: any, user: any, info: any, context: any) {
     const isPublic = context?.args?.[0]?.isPublic ?? false;
@@ -47,7 +47,7 @@ export class JwtOptionalAuthGuard extends AuthGuard('jwt') {
       if (err || !user) {
         return {
           userId: null,
-          scope: { role: null, permissions: [] },
+          scope: { role: null, permissions: [], branch: null },
         } as CurrentUserDto;
       }
       return user;

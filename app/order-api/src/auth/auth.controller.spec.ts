@@ -1,7 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
-import { JwtService } from '@nestjs/jwt';
 import { LoggerService } from 'src/logger/logger.service';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { User } from 'src/user/user.entity';
@@ -11,13 +10,8 @@ import { ConfigService } from '@nestjs/config';
 import { MAPPER_MODULE_PROVIDER } from 'src/app/app.constants';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { Logger } from 'src/logger/logger.entity';
-import { Branch } from 'src/branch/branch.entity';
-import { FileService } from 'src/file/file.service';
-import { File } from 'src/file/file.entity';
 import { MailService } from 'src/mail/mail.service';
 import { MailerService } from '@nestjs-modules/mailer';
-import { ForgotPasswordToken } from './entity/forgot-password-token.entity';
-import { Role } from 'src/role/role.entity';
 import { SystemConfig } from 'src/system-config/system-config.entity';
 import { SystemConfigService } from 'src/system-config/system-config.service';
 import { DataSource } from 'typeorm';
@@ -25,12 +19,12 @@ import { dataSourceMockFactory } from 'src/test-utils/datasource-mock.factory';
 import { MailProducer } from 'src/mail/mail.producer';
 import { VerifyEmailToken } from './entity/verify-email-token.entity';
 import { TransactionManagerService } from 'src/db/transaction-manager.service';
-import { AuthUtils } from './auth.utils';
 import { UserUtils } from 'src/user/user.utils';
 import { VerifyPhoneNumberToken } from './entity/verify-phone-number-token.entity';
 import { ZaloOaConnectorClient } from 'src/zalo-oa-connector/zalo-oa-connector.client';
 import { ZaloOaConnectorConfig } from 'src/zalo-oa-connector/entity/zalo-oa-connector.entity';
 import { HttpService } from '@nestjs/axios';
+import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
 
 describe('AuthController', () => {
   let controller: AuthController;
@@ -40,11 +34,9 @@ describe('AuthController', () => {
       controllers: [AuthController],
       providers: [
         AuthService,
-        FileService,
         SystemConfigService,
         MailProducer,
         TransactionManagerService,
-        AuthUtils,
         UserUtils,
         ZaloOaConnectorClient,
         HttpService,
@@ -73,10 +65,6 @@ describe('AuthController', () => {
           useFactory: repositoryMockFactory,
         },
         {
-          provide: getRepositoryToken(File),
-          useFactory: repositoryMockFactory,
-        },
-        {
           provide: getRepositoryToken(VerifyEmailToken),
           useFactory: repositoryMockFactory,
         },
@@ -85,18 +73,8 @@ describe('AuthController', () => {
           useFactory: repositoryMockFactory,
         },
         {
-          provide: getRepositoryToken(Branch),
-          useFactory: repositoryMockFactory,
-        },
-        {
           provide: getRepositoryToken(Logger),
           useFactory: repositoryMockFactory,
-        },
-        {
-          provide: JwtService,
-          useValue: {
-            sign: jest.fn().mockReturnValue('mocked-token'),
-          },
         },
         {
           provide: ConfigService,
@@ -118,17 +96,19 @@ describe('AuthController', () => {
           useValue: console, // Mock logger (or a custom mock)
         },
         LoggerService,
-        {
-          provide: getRepositoryToken(ForgotPasswordToken),
-          useFactory: repositoryMockFactory,
-        },
-        {
-          provide: getRepositoryToken(Role),
-          useFactory: repositoryMockFactory,
-        },
         MailService,
         { provide: MailerService, useValue: {} },
         LoggerService,
+        {
+          provide: SharedUserServiceClient,
+          useValue: {
+            lookupById: jest.fn(),
+            lookupByPhonenumber: jest.fn(),
+            lookupByIds: jest.fn(),
+            createUser: jest.fn(),
+            updateIdentity: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -141,26 +121,5 @@ describe('AuthController', () => {
 
   it('should be defined', () => {
     expect(controller).toBeDefined();
-  });
-
-  describe('login', () => {
-    // it('should throw an unauthorized exception if login fails', () => {
-    //   expect(
-    //     controller.login({ phonenumber: 'invalid', password: 'invalid' }),
-    //   ).rejects.toThrow(UnauthorizedException);
-    // });
-    // it('should return an access token if login succeeds', async () => {
-    //   const mockResult = { accessToken: 'mocked-token' };
-    //   const mockRequest = {
-    //     method: 'POST',
-    //     originalUrl: '/auth/login',
-    //   };
-    //   expect(
-    //     controller.login(
-    //       { phonenumber: 'johndoe', password: 'johndoe' },
-    //       mockRequest as any,
-    //     ),
-    //   ).resolves.toEqual(mockResult);
-    // });
   });
 });
