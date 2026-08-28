@@ -25,15 +25,11 @@ import { User } from 'src/user/user.entity';
 import {
   attachCreatedByForArrayEntity,
   attachCreatedByForSingleEntity,
-  batchLookupSharedUserIdentities,
-  mergeSharedUserIdentityInto,
-  GENERAL_IDENTITY_FIELDS,
 } from 'src/user/user.helper';
 import { TransactionManagerService } from 'src/db/transaction-manager.service';
 import { Voucher } from 'src/voucher/entity/voucher.entity';
 import { VoucherException } from 'src/voucher/voucher.exception';
 import { VoucherValidation } from 'src/voucher/voucher.validation';
-import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
 
 @Injectable()
 export class UserGroupService {
@@ -48,7 +44,6 @@ export class UserGroupService {
     @Inject(WINSTON_MODULE_NEST_PROVIDER)
     private readonly logger: Logger,
     private readonly transactionManagerService: TransactionManagerService,
-    private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {}
 
   async create(
@@ -150,21 +145,6 @@ export class UserGroupService {
       this.userRepository,
     );
 
-    const identityById = await batchLookupSharedUserIdentities(
-      groupsWithUser.map((group) => group.createdBy?.sharedUserId),
-      this.sharedUserServiceClient,
-      this.logger,
-      context,
-    );
-    groupsWithUser.forEach((group) => {
-      if (!group.createdBy) return;
-      mergeSharedUserIdentityInto(
-        group.createdBy,
-        identityById.get(group.createdBy.sharedUserId),
-        GENERAL_IDENTITY_FIELDS,
-      );
-    });
-
     const userGroupsDto = this.mapper.mapArray(
       groupsWithUser,
       UserGroup,
@@ -205,20 +185,6 @@ export class UserGroupService {
       userGroup,
       this.userRepository,
     );
-
-    if (userGroupWithUser.createdBy) {
-      const identityById = await batchLookupSharedUserIdentities(
-        [userGroupWithUser.createdBy.sharedUserId],
-        this.sharedUserServiceClient,
-        this.logger,
-        context,
-      );
-      mergeSharedUserIdentityInto(
-        userGroupWithUser.createdBy,
-        identityById.get(userGroupWithUser.createdBy.sharedUserId),
-        GENERAL_IDENTITY_FIELDS,
-      );
-    }
 
     return this.mapper.map(userGroupWithUser, UserGroup, UserGroupResponseDto);
   }

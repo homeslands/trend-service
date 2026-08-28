@@ -72,7 +72,6 @@ export class ChefAreaResponseDto extends BaseResponseDto {
   description?: string;
 
   @AutoMap(() => BranchResponseDto)
-  @ApiProperty({ type: () => BranchResponseDto })
   branch: BranchResponseDto;
 
   @AutoMap(() => [ChefOrderResponseDto])

@@ -54,7 +54,6 @@ export class BranchResponseDto extends BaseResponseDto {
   address: string;
 
   @AutoMap(() => [ChefAreaResponseDto])
-  @ApiProperty({ type: () => ChefAreaResponseDto, isArray: true })
   chefAreas: ChefAreaResponseDto[];
 
   @AutoMap(() => AddressResponseDto)

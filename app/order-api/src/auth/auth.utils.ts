@@ -1,13 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { InjectMapper } from '@automapper/nestjs';
-import { Mapper } from '@automapper/core';
 import { UserScopeDto } from 'src/user/user.dto';
 import { User } from 'src/user/user.entity';
 import { AuthValidation } from './auth.validation';
 import { AuthException } from './auth.exception';
 import { RoleEnum } from 'src/role/role.enum';
-import { Branch } from 'src/branch/branch.entity';
-import { BranchResponseDto } from 'src/branch/branch.dto';
 import {
   UserRequirementKey,
   UserRequirementLevel,
@@ -16,19 +12,8 @@ import {
 
 @Injectable()
 export class AuthUtils {
-  constructor(
-    @InjectMapper()
-    private readonly mapper: Mapper,
-  ) {}
-
   buildScope(user: User): string {
-    const scope: UserScopeDto = {
-      role: user.role?.name,
-      permissions: [],
-      branch: user.branch
-        ? this.mapper.map(user.branch, Branch, BranchResponseDto)
-        : null,
-    };
+    const scope: UserScopeDto = { role: user.role?.name, permissions: [] };
 
     const authorityGroupCodes = new Set<string>();
     user.role?.permissions.forEach((permission) => {
@@ -42,7 +27,7 @@ export class AuthUtils {
     return JSON.stringify(scope);
   }
 
-  parseScope(scope: string): UserScopeDto {
+  parseScope(scope: string): { role: string; permissions: string[] } {
     return JSON.parse(scope);
   }
 }

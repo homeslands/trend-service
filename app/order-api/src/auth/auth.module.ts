@@ -3,6 +3,7 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { UserModule } from 'src/user/user.module';
 import { PassportModule } from '@nestjs/passport';
+import { LocalStrategy } from './passport/local/local.strategy';
 import { JwtModule } from '@nestjs/jwt';
 import { jwtConstants } from './constants';
 import { JwtStrategy } from './passport/jwt/jwt.strategy';
@@ -13,6 +14,7 @@ import { AuthProfile } from './auth.mapper';
 import { Branch } from 'src/branch/branch.entity';
 import { FileModule } from 'src/file/file.module';
 import { MailModule } from 'src/mail/mail.module';
+import { ForgotPasswordToken } from './entity/forgot-password-token.entity';
 import { Role } from 'src/role/role.entity';
 import { SystemConfigModule } from 'src/system-config/system-config.module';
 import { VerifyEmailToken } from './entity/verify-email-token.entity';
@@ -23,19 +25,18 @@ import { VerifyPhoneNumberToken } from './entity/verify-phone-number-token.entit
 import { RegisterOtpToken } from './entity/register-otp-token.entity';
 import { ZaloOaConnectorModule } from 'src/zalo-oa-connector/zalo-oa-connector.module';
 import { SharedModule } from 'src/shared/shared.module';
-import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
 
 @Module({
   imports: [
     UserModule,
     PassportModule,
     JwtModule.register({
-      publicKey: jwtConstants.publicKey,
-      verifyOptions: { algorithms: [jwtConstants.algorithm] },
+      secret: jwtConstants.secret,
     }),
     TypeOrmModule.forFeature([
       User,
       Branch,
+      ForgotPasswordToken,
       Role,
       VerifyEmailToken,
       ZaloOaConnectorConfig,
@@ -49,10 +50,9 @@ import { SharedUserServiceModule } from 'src/external-services/shared-user-servi
     DbModule,
     UserModule,
     ZaloOaConnectorModule,
-    SharedModule,
-    SharedUserServiceModule,
+    SharedModule
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, AuthProfile, AuthUtils],
+  providers: [AuthService, LocalStrategy, JwtStrategy, AuthProfile, AuthUtils],
 })
 export class AuthModule { }

@@ -42,7 +42,9 @@ import {
   UserStatisticsResponseDto,
 } from './user.dto';
 import { AppPaginatedResponseDto } from 'src/app/app.dto';
+import { MailService } from 'src/mail/mail.service';
 import { ConfigService } from '@nestjs/config';
+import * as bcrypt from 'bcrypt';
 import { Role } from 'src/role/role.entity';
 import { UserException } from './user.exception';
 import { UserValidation } from './user.validation';
@@ -76,13 +78,16 @@ import { BranchUtils } from 'src/branch/branch.utils';
 import moment from 'moment';
 import ExcelJS from 'exceljs';
 import { TransactionManagerService } from 'src/db/transaction-manager.service';
+import { UserRequirement } from './user-requirement.entity';
 import { CampaignAction } from 'src/campaign/campaign.constants';
-import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
 
 @Injectable()
 export class UserService {
+  private saltOfRounds: number;
+
   constructor(
     private readonly configService: ConfigService,
+    private readonly mailService: MailService,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     @InjectRepository(Branch)
@@ -97,49 +102,14 @@ export class UserService {
     private readonly transactionManagerService: TransactionManagerService,
     private readonly eventEmitter: EventEmitter2,
     private readonly branchUtils: BranchUtils,
-    private readonly sharedUserServiceClient: SharedUserServiceClient,
-  ) {}
+  ) {
+    this.saltOfRounds = this.configService.get<number>('SALT_ROUNDS');
+  }
 
   private isTodayBirthday(dobDM: string): boolean {
     const today = new Date();
     const todayDM = `${String(today.getDate()).padStart(2, '0')}${String(today.getMonth() + 1).padStart(2, '0')}`;
     return dobDM === todayDM;
-  }
-
-  // Ghep field identity moi nhat tu shared-user vao 1 UserResponseDto da map
-  // tu entity cuc bo - dung cho cac endpoint "can du lieu ca 2 ben"
-  // (architect-http.md muc 1.1 quy tac 4): role/branch/sharedUserId lay tu
-  // trend, identity lay tu shared-user thay vi cache cuc bo co the cu.
-  // Fail-open: day la enrichment hien thi, khong phai kiem tra bao mat nhu
-  // isActive trong JwtStrategy (cho van fail-closed, khong doi) - loi mang
-  // chi log warning, khong lam hong ca request.
-  private mergeSharedUserIdentity(
-    dto: UserResponseDto,
-    identity: {
-      phonenumber?: string;
-      firstName?: string;
-      lastName?: string;
-      dob?: string;
-      email?: string;
-      address?: string;
-      isVerifiedEmail?: boolean;
-      isVerifiedPhonenumber?: boolean;
-      isActive?: boolean;
-    } | null,
-  ): UserResponseDto {
-    if (!identity) return dto;
-    return Object.assign(dto, {
-      phonenumber: identity.phonenumber ?? dto.phonenumber,
-      firstName: identity.firstName ?? dto.firstName,
-      lastName: identity.lastName ?? dto.lastName,
-      dob: identity.dob ?? dto.dob,
-      email: identity.email ?? dto.email,
-      address: identity.address ?? dto.address,
-      isVerifiedEmail: identity.isVerifiedEmail ?? dto.isVerifiedEmail,
-      isVerifiedPhonenumber:
-        identity.isVerifiedPhonenumber ?? dto.isVerifiedPhonenumber,
-      isActive: identity.isActive ?? dto.isActive,
-    });
   }
 
   async getUserBySlug(slug: string) {
@@ -156,39 +126,9 @@ export class UserService {
       throw new UserException(UserValidation.USER_NOT_FOUND);
     }
 
-    const dto = this.mapper.map(user, User, UserResponseDto);
-    try {
-      const identity = await this.sharedUserServiceClient.lookupById(
-        user.sharedUserId,
-      );
-      return this.mergeSharedUserIdentity(dto, identity);
-    } catch (error) {
-      this.logger.warn(
-        `Failed to enrich user identity from shared-user, falling back to local cache: ${error?.message}`,
-        context,
-      );
-      return dto;
-    }
+    return this.mapper.map(user, User, UserResponseDto);
   }
 
-  // Sua thong tin 1 user (admin-facing). Branch la du lieu cua trend, sua
-  // cuc bo binh thuong. Cac field identity (firstName/lastName/dob/email/
-  // address) gio thuoc ve shared-user (architect-http.md muc 1.1) - phai ghi
-  // sang do TRUOC (fail-closed: shared-user tra loi thi moi luu cuc bo, tranh
-  // 2 ban lech nhau vinh vien neu shared-user tu choi vd trung SDT o noi
-  // khac), ket qua tra ve ghep tu response cua chinh lan goi do. Van luu lai
-  // ban sao cuc bo (khong xoa) vi cac module khac (xuat Excel, campaign sinh
-  // nhat...) van doc truc tiep cot cuc bo - ngoai pham vi dot sua nay.
-  //
-  // 2 lenh ghi (shared-user + cuc bo) phai la 1 don vi nguyen tu
-  // (architect-http.md muc 1.2 - bat buoc): neu buoc luu cuc bo phia duoi
-  // that bai SAU KHI shared-user da ghi thanh cong, PHAI goi lai
-  // updateIdentity voi gia tri CU de rollback truoc khi bao loi cho client -
-  // khong duoc de lai trang thai "shared-user da doi nhung trend bao loi".
-  // Gia tri cu duoc snapshot bang 1 lan lookupById NGAY TRUOC KHI ghi (khong
-  // dung cot cuc bo lam gia tri cu - cot cuc bo co the da lech vi user co
-  // the tu sua qua PATCH {shared-user}/auth/profile, bo qua trend hoan
-  // toan).
   async updateUser(slug: string, requestData: UpdateUserRequestDto) {
     const context = `${UserService.name}.${this.updateUser.name}`;
     const user = await this.userRepository.findOne({
@@ -196,40 +136,6 @@ export class UserService {
       relations: ['branch', 'role'],
     });
     if (!user) throw new UserException(UserValidation.USER_NOT_FOUND);
-
-    const { firstName, lastName, dob, email, address } = requestData;
-    const hasIdentityChanges =
-      firstName !== undefined ||
-      lastName !== undefined ||
-      dob !== undefined ||
-      email !== undefined ||
-      address !== undefined;
-
-    let beforeIdentity: Awaited<
-      ReturnType<SharedUserServiceClient['lookupById']>
-    > | null = null;
-    if (hasIdentityChanges) {
-      try {
-        beforeIdentity = await this.sharedUserServiceClient.lookupById(
-          user.sharedUserId,
-        );
-      } catch (error) {
-        this.logger.error(
-          `Error snapshotting identity on shared-user before update: ${error.message}`,
-          error.stack,
-          context,
-        );
-        throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-      }
-      if (!beforeIdentity) {
-        this.logger.error(
-          `Shared-user identity not found for sharedUserId ${user.sharedUserId} before update`,
-          null,
-          context,
-        );
-        throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-      }
-    }
 
     Object.assign(user, {
       ...requestData,
@@ -250,29 +156,6 @@ export class UserService {
       const [day, month] = requestData.dob ? requestData.dob.split('/') : [];
       user.dobDM = day && month ? `${day}${month}` : null;
     }
-
-    let identity: Awaited<
-      ReturnType<SharedUserServiceClient['updateIdentity']>
-    > | null = null;
-    if (hasIdentityChanges) {
-      try {
-        identity = await this.sharedUserServiceClient.updateIdentity(
-          user.sharedUserId,
-          { firstName, lastName, dob, email, address },
-        );
-      } catch (error) {
-        this.logger.error(
-          `Error updating identity on shared-user: ${error.message}`,
-          error.stack,
-          context,
-        );
-        if (error?.response?.status === 409) {
-          throw new AuthException(AuthValidation.USER_EXISTS);
-        }
-        throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-      }
-    }
-
     try {
       const updatedUser = await this.userRepository.save(user);
       this.logger.log(`User ${user.id} updated profile`, context);
@@ -284,61 +167,14 @@ export class UserService {
         this.eventEmitter.emit(CampaignAction.USER_BIRTHDAY_TRIGGERED, {
           user: updatedUser,
         });
-      const dto = this.mapper.map(updatedUser, User, UserResponseDto);
-      return identity ? this.mergeSharedUserIdentity(dto, identity) : dto;
+      return this.mapper.map(updatedUser, User, UserResponseDto);
     } catch (error) {
       this.logger.error(
-        `Error when updating user locally after shared-user identity update: ${error.message}`,
+        `Error when updating user: ${error.message}`,
         error.stack,
         context,
       );
-      if (identity && beforeIdentity) {
-        await this.rollbackSharedUserIdentity(
-          user.sharedUserId,
-          {
-            firstName: beforeIdentity.firstName,
-            lastName: beforeIdentity.lastName,
-            dob: beforeIdentity.dob,
-            email: beforeIdentity.email,
-            address: beforeIdentity.address,
-          },
-          { firstName, lastName, dob, email, address },
-          context,
-        );
-      }
       throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-    }
-  }
-
-  // Rollback (architect-http.md muc 1.2 buoc 3): goi lai updateIdentity voi
-  // gia tri CU de bu tru khi buoc ghi cuc bo o trend that bai sau khi
-  // shared-user da ghi thanh cong. Neu chinh lan goi rollback nay cung loi,
-  // log o muc critical kem du context (sharedUserId, gia tri cu/moi that
-  // bai) de xu ly thu cong - day la truong hop du lieu lech that su, khong
-  // tu phuc hoi duoc.
-  private async rollbackSharedUserIdentity(
-    sharedUserId: string,
-    oldValues: Record<string, unknown>,
-    attemptedValues: Record<string, unknown>,
-    context: string,
-  ): Promise<void> {
-    try {
-      await this.sharedUserServiceClient.updateIdentity(
-        sharedUserId,
-        oldValues,
-      );
-      this.logger.warn(
-        `Rolled back shared-user identity for sharedUserId ${sharedUserId} after local save failure`,
-        context,
-      );
-    } catch (rollbackError) {
-      this.logger.error(
-        `CRITICAL: failed to rollback shared-user identity for sharedUserId ${sharedUserId} after local save failure - data is now OUT OF SYNC between trend and shared-user. Attempted new values: ${JSON.stringify(
-          attemptedValues,
-        )}. Intended rollback to: ${JSON.stringify(oldValues)}. Rollback error: ${rollbackError?.message}`,
-        rollbackError?.stack,
-        context,
-      );
     }
   }
 
@@ -368,11 +204,6 @@ export class UserService {
     //     requirement.scope === UserRequirementScope.INITIAL,
     // );
 
-    // Dung de rollback shared-user (architect-http.md muc 1.2 buoc 3) neu
-    // buoc luu cuc bo o duoi that bai sau khi da doi SDT thanh cong ben
-    // shared-user. Chi set khi thuc su da ghi thanh cong sang shared-user.
-    let oldPhonenumberForRollback: string | null = null;
-
     if (blockedPhonenumberRequirement) {
       if (user.phonenumber === requestData.phonenumber) {
         this.logger.warn(
@@ -394,34 +225,6 @@ export class UserService {
           );
           throw new AuthException(AuthValidation.PHONE_NUMBER_ALREADY_EXISTS);
         }
-        // Phonenumber la login key that su - thuoc ve shared-user
-        // (architect-http.md muc 1.1). Ghi sang do TRUOC (fail-closed: neu
-        // shared-user tu choi - vd 409 vi da bi nguoi khac chiem giua luc
-        // check cuc bo va luc goi - thi khong duoc luu ban cuc bo, tranh 2
-        // ben lech nhau). Check cuc bo o tren chi la fast-fail, khong phai
-        // nguon that.
-        const oldPhonenumber = user.phonenumber;
-        try {
-          await this.sharedUserServiceClient.updateIdentity(user.sharedUserId, {
-            phonenumber: requestData.phonenumber,
-          });
-        } catch (error) {
-          this.logger.error(
-            `Error updating phonenumber on shared-user: ${error.message}`,
-            error.stack,
-            context,
-          );
-          if (error?.response?.status === 409) {
-            throw new AuthException(AuthValidation.PHONE_NUMBER_ALREADY_EXISTS);
-          }
-          throw new AuthException(
-            AuthValidation.ERROR_COMPLETE_USER_REGISTRATION,
-          );
-        }
-        // Da ghi thanh cong sang shared-user - tu day tro di neu buoc luu
-        // cuc bo phia duoi that bai, PHAI rollback ve SDT cu nay
-        // (architect-http.md muc 1.2 buoc 3).
-        oldPhonenumberForRollback = oldPhonenumber;
         Object.assign(user, {
           phonenumber: requestData.phonenumber,
         });
@@ -469,134 +272,137 @@ export class UserService {
       user.isActive = true;
     }
 
-    try {
-      await this.transactionManagerService.execute<void>(
-        async (manager) => {
-          await manager.save(user);
-          if (blockedPhonenumberRequirement) {
-            await manager.save(blockedPhonenumberRequirement);
-          }
-          // if (blockedPasswordRequirement) {
-          //   await manager.save(blockedPasswordRequirement);
-          // }
-        },
-        () => {
-          this.logger.log(
-            `User ${user.slug} registration has been completed`,
-            context,
-          );
-        },
-        (error) => {
-          this.logger.warn(
-            `Error when completing user registration: ${error.message}`,
-            context,
-          );
-          throw new AuthException(
-            AuthValidation.ERROR_COMPLETE_USER_REGISTRATION,
-          );
-        },
-      );
-    } catch (error) {
-      // Rollback (architect-http.md muc 1.2 buoc 3): shared-user da doi SDT
-      // thanh cong nhung buoc luu cuc bo that bai - phai tra SDT ve gia tri
-      // cu ben shared-user, khong duoc de 2 ben lech nhau.
-      if (oldPhonenumberForRollback) {
-        await this.rollbackSharedUserIdentity(
-          user.sharedUserId,
-          { phonenumber: oldPhonenumberForRollback },
-          { phonenumber: requestData.phonenumber },
+    await this.transactionManagerService.execute<void>(
+      async (manager) => {
+        await manager.save(user);
+        if (blockedPhonenumberRequirement) {
+          await manager.save(blockedPhonenumberRequirement);
+        }
+        // if (blockedPasswordRequirement) {
+        //   await manager.save(blockedPasswordRequirement);
+        // }
+      },
+      () => {
+        this.logger.log(
+          `User ${user.slug} registration has been completed`,
           context,
         );
-      }
-      throw error;
-    }
+      },
+      (error) => {
+        this.logger.warn(
+          `Error when completing user registration: ${error.message}`,
+          context,
+        );
+        throw new AuthException(
+          AuthValidation.ERROR_COMPLETE_USER_REGISTRATION,
+        );
+      },
+    );
   }
 
-  // Tao user moi: trend quyet dinh role/branch (nghiep vu cua no), sau do
-  // goi noi bo sang shared-user de luu lai identity (phonenumber, mat khau,
-  // ho ten...) - dao nguoc thu tu so voi truoc khi tach (khi do trend tu
-  // luu het). Validate role/branch/trung SDT truoc khi goi sang shared-user
-  // de khong tao "rac" ben do neu request sai ngay tu dau.
-  async createUser(requestData: CreateUserRequestDto) {
+  async createUser(requestData: CreateUserRequestDto, createdRole: string) {
     const context = `${UserService.name}.${this.createUser.name}`;
 
+    // Check if role exists
     const role = await this.roleRepository.findOne({
-      where: { slug: requestData.role },
+      where: {
+        slug: requestData.role,
+      },
     });
-    if (!role) throw new RoleException(RoleValidation.ROLE_NOT_FOUND);
-
-    let branch: Branch | undefined;
-    if (requestData.branch) {
-      branch = await this.branchRepository.findOne({
-        where: { slug: requestData.branch },
-      });
-      if (!branch) throw new BranchException(BranchValidation.BRANCH_NOT_FOUND);
+    if (!role) {
+      this.logger.error(`Role is not found`, null, context);
+      throw new RoleException(RoleValidation.ROLE_NOT_FOUND);
     }
 
-    const existingLocalUser = await this.userRepository.findOne({
-      where: { phonenumber: requestData.phonenumber },
+    // Check phone number uniqueness
+    const userExists = await this.userRepository.findOne({
+      where: {
+        phonenumber: requestData.phonenumber,
+      },
     });
-    if (existingLocalUser) {
+    if (userExists) {
+      this.logger.error(`User already exists`, null, context);
       throw new AuthException(AuthValidation.USER_EXISTS);
     }
 
-    let sharedUser: Awaited<ReturnType<SharedUserServiceClient['createUser']>>;
-    try {
-      sharedUser = await this.sharedUserServiceClient.createUser({
-        phonenumber: requestData.phonenumber,
-        password: requestData.password,
-        firstName: requestData.firstName,
-        lastName: requestData.lastName,
-        dob: requestData.dob,
-        isVerifiedPhonenumber: requestData.isVerifiedPhonenumber,
-        // shared-user van con rang buoc NOT NULL len role (chua tach hoan
-        // toan) - gui kem de qua duoc constraint, KHONG dung lam nguon that.
-        role: requestData.role,
-      });
-    } catch (error) {
-      this.logger.error(
-        `Error when creating identity on shared-user: ${error.message}`,
-        error.stack,
-        context,
-      );
-      if (error?.response?.status === 400 || error?.response?.status === 409) {
-        throw new AuthException(AuthValidation.USER_EXISTS);
-      }
-      throw error;
-    }
+    const user = this.mapper.map(requestData, CreateUserRequestDto, User);
 
-    const user = this.userRepository.create({
-      phonenumber: sharedUser.phonenumber,
-      sharedUserId: sharedUser.id,
+    const hashedPass = await bcrypt.hash(
+      requestData.password,
+      this.saltOfRounds,
+    );
+    Object.assign(user, {
+      password: hashedPass,
       role,
-      branch,
     });
 
+    if (requestData.branch) {
+      const branch = await this.branchRepository.findOne({
+        where: {
+          slug: requestData.branch,
+        },
+      });
+      if (!branch) throw new BranchException(BranchValidation.BRANCH_NOT_FOUND);
+      user.branch = branch;
+    }
+
+    let createdUser = null;
+    if (createdRole == RoleEnum.Admin || createdRole == RoleEnum.SuperAdmin) {
+      user.isVerifiedPhonenumber = requestData.isVerifiedPhonenumber ?? false;
+    } else {
+      user.isVerifiedPhonenumber = false;
+    }
+
     try {
+      const blockedPhonenumberRequirement = new UserRequirement();
+      blockedPhonenumberRequirement.key =
+        UserRequirementKey.NEED_UPDATE_PHONE_NUMBER;
+      blockedPhonenumberRequirement.status = UserRequirementStatus.COMPLETED;
+      blockedPhonenumberRequirement.level = UserRequirementLevel.BLOCK;
+      blockedPhonenumberRequirement.scope = UserRequirementScope.INITIAL;
+
+      const blockedPasswordRequirement = new UserRequirement();
+      blockedPasswordRequirement.key = UserRequirementKey.NEED_UPDATE_PASSWORD;
+      blockedPasswordRequirement.status = UserRequirementStatus.COMPLETED;
+      blockedPasswordRequirement.level = UserRequirementLevel.BLOCK;
+      blockedPasswordRequirement.scope = UserRequirementScope.INITIAL;
+
+      user.userRequirements = [
+        blockedPhonenumberRequirement,
+        blockedPasswordRequirement,
+      ];
+      if (requestData.dob) {
+        const [day, month] = requestData.dob.split('/');
+        user.dobDM = `${day}${month}`;
+      }
       const createdUser = await this.userRepository.save(user);
       this.logger.log(`User has been created successfully`, context);
-      const dto = this.mapper.map(createdUser, User, UserResponseDto);
-      // Ghep identity tu chinh response tao user ben shared-user - row cuc
-      // bo chi luu {phonenumber, sharedUserId, role, branch}, khong luu
-      // firstName/lastName/... nen phai lay tu day, khong the map tu entity
-      // cuc bo (se rong) (architect-http.md muc 1.1 quy tac 4).
-      return this.mergeSharedUserIdentity(dto, sharedUser);
+
+      if (createdUser) {
+        this.eventEmitter.emit(CampaignAction.USER_CREATED, {
+          user: createdUser,
+        });
+        if (user.dobDM && this.isTodayBirthday(user.dobDM))
+          this.eventEmitter.emit(CampaignAction.USER_BIRTHDAY_TRIGGERED, {
+            user,
+          });
+      }
     } catch (error) {
       this.logger.error(
-        `Error when saving local user: ${error.message}`,
+        `Error when creating user: ${error.message}`,
         error.stack,
         context,
       );
       throw new UserException(UserValidation.ERROR_CREATE_USER);
     }
+
+    if (createdUser)
+      await this.sharedBalanceService.create({ userSlug: createdUser.slug });
+
+    return this.mapper.map(user, User, UserResponseDto);
   }
 
-  // Gan role cho 1 user cua shared-user (theo phonenumber, khoa dang nhap
-  // dung chung giua 2 he thong). Neu trend chua co local row cho nguoi nay
-  // (lan dau duoc admin cap quyen), tu tao 1 row toi gian gom sharedUserId +
-  // phonenumber + role - khong con flow "tao user + mat khau" rieng, vi
-  // identity/mat khau da thuoc ve shared-user.
-  async updateUserRole(requestData: UpdateUserRoleRequestDto) {
+  async updateUserRole(slug: string, requestData: UpdateUserRoleRequestDto) {
     const context = `${UserService.name}.${this.updateUserRole.name}`;
     const role = await this.roleRepository.findOne({
       where: {
@@ -605,41 +411,18 @@ export class UserService {
     });
     if (!role) throw new RoleException(RoleValidation.ROLE_NOT_FOUND);
 
-    let user = await this.userRepository.findOne({
-      where: { phonenumber: requestData.phonenumber },
+    const user = await this.userRepository.findOne({
+      where: { slug },
       relations: ['role'],
     });
+    if (!user) throw new UserException(UserValidation.USER_NOT_FOUND);
 
-    if (user && user.role?.name === RoleEnum.Customer) {
+    if (user.role.name === RoleEnum.Customer) {
       this.logger.warn(
         `Can not update customer role to ${role.name} role`,
         context,
       );
       throw new UserException(UserValidation.CANNOT_UPDATE_CUSTOMER_ROLE);
-    }
-
-    // Uu tien tra cuu theo `id` neu da biet (architect-http.md muc 1.3) -
-    // `id` la khoa chinh that, on dinh hon `phonenumber` (co the doi qua
-    // completeUserRegistration). Da co row cuc bo (da tung gan role truoc
-    // do) thi dung thang sharedUserId da luu, chi fallback sang
-    // lookupByPhonenumber khi chua tung co row cuc bo (lan dau gan role,
-    // chua biet id).
-    const sharedUser = user
-      ? await this.sharedUserServiceClient.lookupById(user.sharedUserId)
-      : await this.sharedUserServiceClient.lookupByPhonenumber(
-          requestData.phonenumber,
-        );
-    if (!sharedUser) throw new UserException(UserValidation.USER_NOT_FOUND);
-
-    if (!user) {
-      user = this.userRepository.create({
-        phonenumber: sharedUser.phonenumber,
-        sharedUserId: sharedUser.id,
-        // Ngay dang ky that ben shared-user - KHONG de @CreateDateColumn tu
-        // sinh theo gio tao row nay (gio admin gan role, khong phai gio
-        // dang ky), xem issuses/sync-user-data-with-role.md muc 6.3.
-        createdAt: new Date(sharedUser.createdAt),
-      });
     }
 
     try {
@@ -652,14 +435,26 @@ export class UserService {
         error.stack,
         context,
       );
-      throw error;
     }
 
-    const dto = this.mapper.map(user, User, UserResponseDto);
-    // Ghep identity - row cuc bo (nhat la khi vua tao lan dau) khong luu du
-    // firstName/lastName/..., phai lay tu lan lookup vua goi o tren (khong
-    // goi lai lan 2) (architect-http.md muc 1.1 quy tac 4).
-    return this.mergeSharedUserIdentity(dto, sharedUser);
+    return this.mapper.map(user, User, UserResponseDto);
+  }
+
+  async resetPassword(slug: string) {
+    const context = `${UserService.name}.${this.resetPassword.name}`;
+    const user = await this.userRepository.findOne({
+      where: { slug },
+    });
+    if (!user) throw new UserException(UserValidation.USER_NOT_FOUND);
+
+    const newPassword = Math.random().toString(36).slice(-8);
+    const hashedPass = await bcrypt.hash(newPassword, this.saltOfRounds);
+
+    user.password = hashedPass;
+    await this.userRepository.save(user);
+    this.logger.log(`User password reset for ${user.email}`, context);
+
+    this.mailService.sendNewPassword(user, newPassword);
   }
 
   async getAllUsers(
@@ -755,35 +550,10 @@ export class UserService {
     const hasNext = page < totalPages;
     const hasPrevious = page > 1;
 
-    const items = this.mapper.mapArray(users, User, UserResponseDto);
-    // Ghep identity moi nhat tu shared-user vao ca trang danh sach - 1 lan
-    // goi batch, khong goi lookup rieng theo tung dong (architect-http.md
-    // muc 1.1 quy tac 4). Fail-open: loi mang chi log warning, tra ve trang
-    // danh sach voi identity cache cuc bo thay vi lam hong ca request.
-    try {
-      const sharedUserIds = users
-        .map((user) => user.sharedUserId)
-        .filter(Boolean);
-      const identities =
-        await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
-      const identityById = new Map(
-        identities.map((identity) => [identity.id, identity]),
-      );
-      items.forEach((dto, index) => {
-        const identity = identityById.get(users[index].sharedUserId);
-        if (identity) this.mergeSharedUserIdentity(dto, identity);
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich user list identity from shared-user, falling back to local cache: ${error?.message}`,
-        `${UserService.name}.${this.getAllUsers.name}`,
-      );
-    }
-
     return {
       hasNext: hasNext,
       hasPrevios: hasPrevious,
-      items,
+      items: this.mapper.mapArray(users, User, UserResponseDto),
       total,
       page,
       pageSize,
@@ -893,30 +663,6 @@ export class UserService {
       });
     }
 
-    // Ghep identity moi nhat tu shared-user - danh sach dung de xuat file
-    // cho nguoi dung xem/luu lai, khong the de ten/SDT/ngay sinh la ban cuc
-    // bo co the cu (architect-http.md muc 1.1 quy tac 4, cung pattern
-    // getAllUsers). 1 lan goi batch, khong goi rieng tung dong. Fail-open:
-    // loi mang chi log warning, xuat file bang du lieu cuc bo thay vi lam
-    // hong ca request.
-    const identityById = new Map<
-      string,
-      Awaited<ReturnType<SharedUserServiceClient['lookupByIds']>>[number]
-    >();
-    try {
-      const sharedUserIds = users
-        .map((user) => user.sharedUserId)
-        .filter(Boolean);
-      const identities =
-        await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
-      identities.forEach((identity) => identityById.set(identity.id, identity));
-    } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich export identity from shared-user, falling back to local cache: ${error?.message}`,
-        context,
-      );
-    }
-
     // Build workbook
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Users');
@@ -930,15 +676,15 @@ export class UserService {
     worksheet.getRow(1).font = { bold: true };
 
     users.forEach((user, index) => {
-      const identity = identityById.get(user.sharedUserId);
-      const firstName = identity?.firstName ?? user.firstName;
-      const lastName = identity?.lastName ?? user.lastName;
-      const name = [firstName, lastName].filter(Boolean).join(' ').trim();
+      const name = [user.firstName, user.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
       worksheet.addRow({
         index: index + 1,
         name: name || 'N/A',
-        phonenumber: identity?.phonenumber ?? user.phonenumber ?? 'N/A',
-        dob: identity?.dob ?? user.dob ?? 'N/A',
+        phonenumber: user.phonenumber || 'N/A',
+        dob: user.dob || 'N/A',
         role: user.role.name || 'N/A',
       });
     });
@@ -1073,36 +819,10 @@ export class UserService {
       ),
     ]);
 
-    // Ghep ten khach hang moi nhat tu shared-user - customerName tu raw SQL
-    // la ban cuc bo co the cu (architect-http.md muc 1.1 quy tac 4, cung
-    // pattern getAllUsers/exportUsersToExcel). 1 lan goi batch. Fail-open:
-    // loi mang chi log warning, dung ban cuc bo thay vi lam hong ca request.
-    const customerNameById = new Map<string, string>();
-    try {
-      const sharedUserIds = results
-        .map((item) => item.customerSharedUserId)
-        .filter(Boolean);
-      const identities =
-        await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
-      identities.forEach((identity) => {
-        const name = [identity.firstName, identity.lastName]
-          .filter(Boolean)
-          .join(' ')
-          .trim();
-        if (name) customerNameById.set(identity.id, name);
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich account revenue customer name from shared-user, falling back to local cache: ${error?.message}`,
-        context,
-      );
-    }
-
     const customers: AccountRevenueCustomerResponseDto[] = results.map(
       (item) => ({
         customerSlug: item.customerSlug,
-        customerName:
-          customerNameById.get(item.customerSharedUserId) || item.customerName,
+        customerName: item.customerName,
         customerRegisteredAt: moment(item.customerRegisteredAt).toDate(),
         totalAmount: Number(item.totalAmount),
         totalAmountPoint: Number(item.totalAmountPoint),
@@ -1163,8 +883,21 @@ export class UserService {
     return { summary, customers, data, total };
   }
 
-  // toggleActiveUser da bi xoa - khoa/mo khoa tai khoan gio quy het ve
-  // shared-user, xem comment trong user.controller.ts.
+  async toggleActiveUser(slug: string) {
+    const context = `${UserService.name}.${this.toggleActiveUser.name}`;
+    const user = await this.userRepository.findOne({
+      where: { slug },
+    });
+    if (!user) {
+      this.logger.warn(`User ${slug} not found`, context);
+      throw new UserException(UserValidation.USER_NOT_FOUND);
+    }
+
+    user.isActive = !user.isActive;
+    await this.userRepository.save(user);
+    this.logger.log(`User ${slug} active status has been toggled`, context);
+    return this.mapper.map(user, User, UserResponseDto);
+  }
 
   async updateUserLanguage(
     userId: string,

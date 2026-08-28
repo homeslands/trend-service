@@ -1,7 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { UserController } from './user.controller';
 import { UserService } from './user.service';
-import { UserScheduler } from './user.scheduler';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { mapperMockFactory } from 'src/test-utils/mapper-mock.factory';
 import { MAPPER_MODULE_PROVIDER } from 'src/app/app.constants';
@@ -14,11 +13,6 @@ import { MailerService } from '@nestjs-modules/mailer';
 import { Role } from 'src/role/role.entity';
 import { MailProducer } from 'src/mail/mail.producer';
 import { Branch } from 'src/branch/branch.entity';
-import { EventEmitter2 } from '@nestjs/event-emitter';
-import { SharedBalanceService } from 'src/shared/services/shared-balance.service';
-import { TransactionManagerService } from 'src/db/transaction-manager.service';
-import { BranchUtils } from 'src/branch/branch.utils';
-import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
 
 describe('UserController', () => {
   let controller: UserController;
@@ -28,7 +22,6 @@ describe('UserController', () => {
       controllers: [UserController],
       providers: [
         UserService,
-        { provide: UserScheduler, useValue: {} },
         MailService,
         MailProducer,
         {
@@ -67,11 +60,6 @@ describe('UserController', () => {
             }),
           },
         },
-        { provide: SharedBalanceService, useValue: {} },
-        { provide: TransactionManagerService, useValue: {} },
-        { provide: EventEmitter2, useValue: {} },
-        { provide: BranchUtils, useValue: {} },
-        { provide: SharedUserServiceClient, useValue: {} },
       ],
     }).compile();
 
