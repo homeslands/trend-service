@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -127,6 +128,22 @@ export class UserService {
       isActive?: boolean;
     } | null,
   ): UserResponseDto {
+    // `isActive` gan RIENG va gan LUON, ke ca khi khong co identity - KHONG
+    // duoc rot ve `dto.isActive`.
+    //
+    // Khoa/mo khoa tai khoan quy het ve shared-user (architect-http.md muc
+    // 1.1), nen cot `is_active_column` ben trend la du lieu chet: khong con
+    // ai ghi vao no, mac dinh `true`, va se bi xoa khi ket thuc chuyen doi
+    // (user_tbl chi con sharedUserId + role + branch). Lay no lam gia tri du
+    // phong nghia la tra ve "dang hoat dong" cho ca tai khoan vua bi khoa -
+    // dung lo hong tester ghi ngay 03/09/2026
+    // (tests/tester-issues/1.3.9.xlsx dong 38).
+    //
+    // Khong co identity => `false`. Day khong phai gia tri an toan tuy tien
+    // ma la su that: khong co ban ghi ben shared-user thi tai khoan do khong
+    // xac thuc duoc (JwtStrategy tra theo sharedUserId roi chan neu khong
+    // thay), nen "khong dung duoc" mo ta dung trang thai cua no.
+    dto.isActive = identity?.isActive ?? false;
     if (!identity) return dto;
     return Object.assign(dto, {
       phonenumber: identity.phonenumber ?? dto.phonenumber,
@@ -138,7 +155,6 @@ export class UserService {
       isVerifiedEmail: identity.isVerifiedEmail ?? dto.isVerifiedEmail,
       isVerifiedPhonenumber:
         identity.isVerifiedPhonenumber ?? dto.isVerifiedPhonenumber,
-      isActive: identity.isActive ?? dto.isActive,
     });
   }
 
@@ -157,17 +173,24 @@ export class UserService {
     }
 
     const dto = this.mapper.map(user, User, UserResponseDto);
+    // Fail-closed: goi hong thi tra 503, KHONG rot ve ban cuc bo nua. Ban cuc
+    // bo khong con `isActive` that (xem mergeSharedUserIdentity), nen tra ve
+    // no la tra ve so lieu sai duoi vo boc 200. Doi lai gan nhu khong mat
+    // tinh san sang nao: JwtStrategy da goi chinh shared-user va nem 503
+    // trong MOI request co auth, nen shared-user chet thi request khong bao
+    // gio di toi duoc day.
     try {
       const identity = await this.sharedUserServiceClient.lookupById(
         user.sharedUserId,
       );
       return this.mergeSharedUserIdentity(dto, identity);
     } catch (error) {
-      this.logger.warn(
-        `Failed to enrich user identity from shared-user, falling back to local cache: ${error?.message}`,
+      this.logger.error(
+        `Failed to enrich user identity from shared-user: ${error?.message}`,
+        error?.stack,
         context,
       );
-      return dto;
+      throw new ServiceUnavailableException();
     }
   }
 
@@ -205,30 +228,37 @@ export class UserService {
       email !== undefined ||
       address !== undefined;
 
+    // Goi LUON, ke ca khi request chi doi branch. Truoc day lan lookup nay
+    // nam trong `if (hasIdentityChanges)`, nen duong "chi doi branch" khong
+    // hoi shared-user lan nao va response tra ve `isActive` cua cot cuc bo -
+    // luon `true`, ke ca voi tai khoan da bi khoa. Ngoai ra day van la ban
+    // snapshot gia tri CU phuc vu rollback ben duoi.
     let beforeIdentity: Awaited<
       ReturnType<SharedUserServiceClient['lookupById']>
     > | null = null;
-    if (hasIdentityChanges) {
-      try {
-        beforeIdentity = await this.sharedUserServiceClient.lookupById(
-          user.sharedUserId,
-        );
-      } catch (error) {
-        this.logger.error(
-          `Error snapshotting identity on shared-user before update: ${error.message}`,
-          error.stack,
-          context,
-        );
-        throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-      }
-      if (!beforeIdentity) {
-        this.logger.error(
-          `Shared-user identity not found for sharedUserId ${user.sharedUserId} before update`,
-          null,
-          context,
-        );
-        throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-      }
+    try {
+      beforeIdentity = await this.sharedUserServiceClient.lookupById(
+        user.sharedUserId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Error snapshotting identity on shared-user before update: ${error.message}`,
+        error.stack,
+        context,
+      );
+      throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
+    }
+    // Chi bat buoc phai co identity khi sap GHI sang shared-user (can gia tri
+    // cu de rollback). Duong chi doi branch van chay tiep duoc voi
+    // beforeIdentity = null: khi do mergeSharedUserIdentity se tra
+    // `isActive: false`, dung voi 1 row khong con danh tinh ben shared-user.
+    if (hasIdentityChanges && !beforeIdentity) {
+      this.logger.error(
+        `Shared-user identity not found for sharedUserId ${user.sharedUserId} before update`,
+        null,
+        context,
+      );
+      throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
     }
 
     Object.assign(user, {
@@ -285,7 +315,10 @@ export class UserService {
           user: updatedUser,
         });
       const dto = this.mapper.map(updatedUser, User, UserResponseDto);
-      return identity ? this.mergeSharedUserIdentity(dto, identity) : dto;
+      // Duong chi doi branch khong goi updateIdentity nen `identity` la null -
+      // khi do dung ban snapshot vua lay o tren. Luon phai merge, vi
+      // `isActive` cua dto la cot cuc bo (du lieu chet, luon `true`).
+      return this.mergeSharedUserIdentity(dto, identity ?? beforeIdentity);
     } catch (error) {
       this.logger.error(
         `Error when updating user locally after shared-user identity update: ${error.message}`,
@@ -758,8 +791,12 @@ export class UserService {
     const items = this.mapper.mapArray(users, User, UserResponseDto);
     // Ghep identity moi nhat tu shared-user vao ca trang danh sach - 1 lan
     // goi batch, khong goi lookup rieng theo tung dong (architect-http.md
-    // muc 1.1 quy tac 4). Fail-open: loi mang chi log warning, tra ve trang
-    // danh sach voi identity cache cuc bo thay vi lam hong ca request.
+    // muc 1.1 quy tac 4).
+    //
+    // Fail-closed, giong getUserBySlug: goi hong thi tra 503 thay vi tra 200
+    // kem cot `isActive` cuc bo (luon `true`, ke ca voi tai khoan vua bi
+    // khoa) - dung lo hong tester ghi ngay 03/09/2026
+    // (tests/tester-issues/1.3.9.xlsx dong 38).
     try {
       const sharedUserIds = users
         .map((user) => user.sharedUserId)
@@ -769,15 +806,20 @@ export class UserService {
       const identityById = new Map(
         identities.map((identity) => [identity.id, identity]),
       );
+      // Goi merge cho MOI dong, ke ca dong khong tra cuu duoc identity:
+      // chinh nhanh `if (identity)` cu la cho tai khoan bi khoa lot qua voi
+      // `isActive` cuc bo con nguyen.
       items.forEach((dto, index) => {
         const identity = identityById.get(users[index].sharedUserId);
-        if (identity) this.mergeSharedUserIdentity(dto, identity);
+        this.mergeSharedUserIdentity(dto, identity ?? null);
       });
     } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich user list identity from shared-user, falling back to local cache: ${error?.message}`,
+      this.logger.error(
+        `Failed to batch-enrich user list identity from shared-user: ${error?.message}`,
+        error?.stack,
         `${UserService.name}.${this.getAllUsers.name}`,
       );
+      throw new ServiceUnavailableException();
     }
 
     return {
