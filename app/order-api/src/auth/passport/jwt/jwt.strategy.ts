@@ -91,7 +91,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     const scope = this.authUtils.buildScope(user);
     return {
-      userId: payload.sub,
+      // userId = id CUC BO cua trend (user_tbl.id), KHONG phai payload.sub
+      // (id ben shared-user). Moi noi tieu thu CurrentUserDto trong trend
+      // deu dung field nay de tra row cuc bo / gan quan he (vd
+      // AuthService.getProfile, PaymentService, UserGroupService.create...),
+      // nen tra payload.sub vao day se lam moi query cuc bo truot -> loi
+      // USER_NOT_FOUND. Muon lay id ben shared-user thi doc user.sharedUserId.
+      userId: user.id,
       scope: this.authUtils.parseScope(scope),
     } as CurrentUserDto;
   }
