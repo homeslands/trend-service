@@ -76,13 +76,15 @@ import {
   FeatureFlagSystems,
   FeatureSystemGroups,
 } from 'src/feature-flag-system/feature-flag-system.constant';
-import { checkActiveUser, checkUserRequirement } from 'src/auth/auth.utils';
+import { checkUserRequirement } from 'src/auth/auth.utils';
+import { UserActiveChecker } from 'src/external-services/shared-user-service/user-active.checker';
 import { NotificationUtils } from 'src/notification/notification.utils';
 @Injectable()
 export class OrderService {
   constructor(
     @InjectRepository(Order)
     private readonly orderRepository: Repository<Order>,
+    private readonly userActiveChecker: UserActiveChecker,
     @InjectMapper() private readonly mapper: Mapper,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
@@ -1287,7 +1289,7 @@ export class OrderService {
     });
     if (!owner) owner = defaultCustomer;
 
-    checkActiveUser(owner);
+    await this.userActiveChecker.assertActive(owner);
     checkUserRequirement(owner);
 
     // Get cashier
