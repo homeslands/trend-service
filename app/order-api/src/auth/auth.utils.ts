@@ -47,11 +47,12 @@ export class AuthUtils {
   }
 }
 
-export function checkActiveUser(user: User): void {
-  if (!user?.isActive) {
-    throw new AuthException(AuthValidation.USER_NOT_ACTIVE);
-  }
-}
+// `checkActiveUser` da bi go (thay bang `UserActiveChecker` trong
+// src/external-services/shared-user-service/). No doc cot `is_active_column`
+// cuc bo - thu da ngung duoc ghi tu dot "khoa tai khoan quy han ve
+// shared-user" (architect-http.md muc 1.1), nen cang ngay cang lech. Sau
+// khi go, khong con cho nao trong trend doc cot do nua: day la dieu kien de
+// giai doan 2 drop duoc no.
 
 export function checkUserRequirement(user: User): void {
   if (

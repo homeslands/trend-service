@@ -179,11 +179,11 @@ export class UserService {
     // tinh san sang nao: JwtStrategy da goi chinh shared-user va nem 503
     // trong MOI request co auth, nen shared-user chet thi request khong bao
     // gio di toi duoc day.
+    let identity: Awaited<ReturnType<SharedUserServiceClient['lookupById']>>;
     try {
-      const identity = await this.sharedUserServiceClient.lookupById(
+      identity = await this.sharedUserServiceClient.lookupById(
         user.sharedUserId,
       );
-      return this.mergeSharedUserIdentity(dto, identity);
     } catch (error) {
       this.logger.error(
         `Failed to enrich user identity from shared-user: ${error?.message}`,
@@ -192,6 +192,20 @@ export class UserService {
       );
       throw new ServiceUnavailableException();
     }
+
+    // Co hang cuc bo nhung shared-user khong co danh tinh => nguoi nay khong
+    // thuc su ton tai. Tra 404 thay vi 200 kem cac field danh tinh rong
+    // (architect-http.md muc 1.7: hang cuc bo KHONG phai bang chung ton tai).
+    if (!identity) {
+      this.logger.error(
+        `Shared-user identity not found for sharedUserId ${user.sharedUserId}`,
+        null,
+        context,
+      );
+      throw new UserException(UserValidation.USER_NOT_FOUND);
+    }
+
+    return this.mergeSharedUserIdentity(dto, identity);
   }
 
   // Sua thong tin 1 user (admin-facing). Branch la du lieu cua trend, sua
@@ -252,13 +266,15 @@ export class UserService {
     // cu de rollback). Duong chi doi branch van chay tiep duoc voi
     // beforeIdentity = null: khi do mergeSharedUserIdentity se tra
     // `isActive: false`, dung voi 1 row khong con danh tinh ben shared-user.
+    // 404 tu shared-user = khong co danh tinh nay -> bao dung "not found",
+    // khong bao thanh loi ghi chung chung (architect-http.md muc 1.7).
     if (hasIdentityChanges && !beforeIdentity) {
       this.logger.error(
         `Shared-user identity not found for sharedUserId ${user.sharedUserId} before update`,
         null,
         context,
       );
-      throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
+      throw new AuthException(AuthValidation.USER_NOT_FOUND);
     }
 
     Object.assign(user, {
@@ -498,9 +514,19 @@ export class UserService {
       );
     }
 
-    if (!user.isActive) {
-      user.isActive = true;
-    }
+    // Truoc day cho nay tu bat lai `user.isActive = true` khi user hoan tat
+    // dang ky. Da go (2026-09-04): tu dot "khoa tai khoan quy han ve
+    // shared-user" (architect-http.md muc 1.1), cot cuc bo nay khong con ai
+    // doc, va viec ghi vao no KHONG mo khoa tai khoan that - trang thai that
+    // nam ben shared-user. Nghia la doan code do da khong con tac dung ke tu
+    // dot cutover, chi con lam ban mot cot sap bi drop o giai doan 2.
+    //
+    // Neu nghiep vu THAT SU can "hoan tat dang ky thi mo khoa lai tai
+    // khoan", phai lam bang mot duong ghi sang shared-user va tuan theo muc
+    // 1.2 (ghi shared-user truoc, rollback neu ghi cuc bo hong) - hien
+    // `POST /internal/users/:id/update-identity` khong nhan `isActive`, nen
+    // day la viec can quyet dinh rieng, khong phai sua tien tay o day. Xem
+    // progress/trend-api.md muc "Bo sung (2026-09-04)".
 
     try {
       await this.transactionManagerService.execute<void>(
@@ -620,7 +646,45 @@ export class UserService {
         error.stack,
         context,
       );
+      // Rollback (architect-http.md muc 1.2 buoc 3): identity da duoc tao
+      // ben shared-user o tren, buoc ghi cuc bo vua that bai - phai bu tru
+      // ngay, khong duoc de lai trang thai "shared-user da tao nhung trend
+      // bao loi". Neu khong bu tru, so dien thoai do bi giu vinh vien ben
+      // shared-user va admin khong bao gio tao lai duoc user nay (lan sau
+      // se dinh USER_EXISTS tu chinh shared-user).
+      await this.rollbackSharedUserCreate(
+        sharedUser.id,
+        requestData.phonenumber,
+        context,
+      );
       throw new UserException(UserValidation.ERROR_CREATE_USER);
+    }
+  }
+
+  // Rollback (architect-http.md muc 1.2 buoc 3) cho duong TAO user - khac
+  // rollbackSharedUserIdentity o cho khong co "gia tri cu" de ghi de, vi
+  // truoc buoc tao thi ben shared-user chua co gi. Bu tru dung nghia o day
+  // la huy identity vua tao (tra lai so dien thoai + tat isActive).
+  //
+  // Neu chinh lan bu tru nay cung loi, log critical kem du context de xu ly
+  // thu cong - dung muc 1.2 buoc 4.
+  private async rollbackSharedUserCreate(
+    sharedUserId: string,
+    phonenumber: string,
+    context: string,
+  ): Promise<void> {
+    try {
+      await this.sharedUserServiceClient.revertCreatedUser(sharedUserId);
+      this.logger.warn(
+        `Rolled back shared-user identity ${sharedUserId} after local save failure`,
+        context,
+      );
+    } catch (rollbackError) {
+      this.logger.error(
+        `CRITICAL: failed to roll back shared-user identity ${sharedUserId} (phonenumber ${phonenumber}) after local save failure - the identity now EXISTS on shared-user with no matching row on trend. Manual cleanup required (revert or delete it) before this phonenumber can be used again. Rollback error: ${rollbackError?.message}`,
+        rollbackError?.stack,
+        context,
+      );
     }
   }
 
@@ -1213,6 +1277,11 @@ export class UserService {
     requestData: UpdateUserLanguageRequestDto,
   ) {
     const context = `${UserService.name}.${this.updateUserLanguage.name}`;
+    // CO Y khong load quan he `branch`/`role` o day. Ban goc cua route nay
+    // cung khong load, nen 2 field do KHONG xuat hien trong JSON tra ve;
+    // them relations vao se lam response moc them 2 key - doi shape ngoai
+    // chu dich, dung dieu architect-http.md muc 1.4 cam. Buoc ghep identity
+    // ben duoi khong can den chung.
     const user = await this.userRepository.findOne({
       where: { id: userId },
     });
@@ -1220,9 +1289,74 @@ export class UserService {
       this.logger.warn(`User ${userId} not found`, context);
       throw new UserException(UserValidation.USER_NOT_FOUND);
     }
+
+    // `language` la mot field IDENTITY (architect-http.md muc 1.6) - truoc
+    // day route nay chi ghi cot cuc bo, nen ban `language` ben shared-user
+    // khong bao gio duoc cap nhat va 2 ben lech im lang. Nay ghi xuyen 2
+    // service theo dung muc 1.2: shared-user truoc, cuc bo sau, rollback
+    // neu buoc sau hong.
+    //
+    // Van GIU ban cuc bo (dual-write) vi ~15 cho trong trend (notification,
+    // campaign sinh nhat) con doc `user.language` truc tiep - go cac cho do
+    // thuoc giai doan 5, xem bang chan o progress/trend-api.md giai doan 2.
+    const beforeIdentity = await this.sharedUserServiceClient.lookupById(
+      user.sharedUserId,
+    );
+    if (!beforeIdentity) {
+      this.logger.error(
+        `No shared-user identity for sharedUserId ${user.sharedUserId}`,
+        null,
+        context,
+      );
+      throw new UserException(UserValidation.USER_NOT_FOUND);
+    }
+
+    const identity = await this.sharedUserServiceClient.updateIdentity(
+      user.sharedUserId,
+      { language: requestData.language },
+    );
+
     user.language = requestData.language;
-    await this.userRepository.save(user);
+    try {
+      await this.userRepository.save(user);
+    } catch (error) {
+      this.logger.error(
+        `Error when saving local language: ${error.message}`,
+        error.stack,
+        context,
+      );
+      await this.rollbackSharedUserIdentity(
+        user.sharedUserId,
+        { language: beforeIdentity.language },
+        { language: requestData.language },
+        context,
+      );
+      // Cung ma loi ma updateUser dung khi luu cuc bo that bai - khong dat
+      // them ma moi cho mot nhanh loi cung loai.
+      throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
+    }
+
     this.logger.log(`User ${user.slug} language has been updated`, context);
-    return this.mapper.map(user, User, AuthProfileResponseDto);
+
+    // Ghep identity moi nhat tu shared-user vao response - cung pattern
+    // AuthService.getProfile (architect-http.md muc 1.1 quy tac 4). Truoc
+    // day route nay map thang tu entity cuc bo nen tra ve ho ten/SDT/email
+    // co the da cu. Danh sach field ghep khop dung AuthProfileResponseDto,
+    // khong them khong bot (muc 1.4).
+    const dto = this.mapper.map(user, User, AuthProfileResponseDto);
+    Object.assign(dto, {
+      phonenumber: identity.phonenumber ?? dto.phonenumber,
+      firstName: identity.firstName ?? dto.firstName,
+      lastName: identity.lastName ?? dto.lastName,
+      dob: identity.dob ?? dto.dob,
+      email: identity.email ?? dto.email,
+      address: identity.address ?? dto.address,
+      image: identity.image ?? dto.image,
+      isVerifiedEmail: identity.isVerifiedEmail ?? dto.isVerifiedEmail,
+      isVerifiedPhonenumber:
+        identity.isVerifiedPhonenumber ?? dto.isVerifiedPhonenumber,
+      language: identity.language ?? dto.language,
+    });
+    return dto;
   }
 }
