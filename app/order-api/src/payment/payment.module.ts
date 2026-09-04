@@ -1,3 +1,4 @@
+import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
 import { Module } from '@nestjs/common';
 import { PaymentService } from './payment.service';
 import { PaymentController } from './payment.controller';
@@ -39,6 +40,7 @@ import { QrPaymentModule } from 'src/qr-payment/qr-payment.module';
 
 @Module({
   imports: [
+    SharedUserServiceModule,
     TypeOrmModule.forFeature([
       Payment,
       Order,
