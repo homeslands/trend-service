@@ -1,5 +1,5 @@
 import { HttpService } from '@nestjs/axios';
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import { signInternalRequest } from 'src/common/utils/internal-signature.util';
@@ -28,6 +28,7 @@ export interface SharedUserLookupResponse {
   image?: string;
   isVerifiedEmail?: boolean;
   isVerifiedPhonenumber?: boolean;
+  language?: string;
   // Ngay dang ky that ben shared-user - nguon duy nhat de ghi vao
   // user.createdAt khi tu tao row lazy cuc bo (KHONG dung gio tao row/gio
   // job chay), xem issuses/sync-user-data-with-role.md muc 6.3.
@@ -61,12 +62,45 @@ export interface UpdateSharedUserIdentityRequest {
   email?: string;
   address?: string;
   image?: string;
+  language?: string;
 }
 
 // Client wrapper goi HTTP noi bo sang shared-user (/internal/*). Cac module
 // khac khong tu dung HttpService truc tiep - luon qua wrapper nay.
 @Injectable()
 export class SharedUserServiceClient {
+  /**
+   * Dung cho cac ham DOC (lookupById, lookupByPhonenumber, lookupByIds,
+   * listRecent): phan biet ro hai thu ma truoc day bi tron lam mot o vai
+   * noi goi.
+   *
+   * - **404** = shared-user tra loi binh thuong, va cau tra loi la "khong co
+   *   user nay". Ben goi tu quyet dinh (chan, hay bo qua buoc ghep).
+   * - **Moi thu khac** (mat mang, timeout, 5xx, 403 sai chu ky) = shared-user
+   *   KHONG tra loi duoc. Day khong phai "khong tim thay", va tuyet doi khong
+   *   duoc de ben goi hieu nham thanh vay.
+   *
+   * Vi sao chuyen thanh `ServiceUnavailableException` ngay tai day thay vi de
+   * tung noi goi tu bat: loi axios KHONG phai `HttpException`, ma
+   * `HttpExceptionFilter` lai `@Catch(HttpException)` - nen neu de nguyen, no
+   * roi xuong bo xu ly mac dinh cua Nest va ra **500 "Internal server error"**.
+   * `JwtStrategy` da tu chuyen thanh 503 tu truoc, con `updateUserRole`,
+   * `UserActiveChecker` va `updateUserLanguage` thi chua - cung mot nguyen
+   * nhan lai ra hai ma khac nhau tuy endpoint. Gom vao day de moi ham doc
+   * hanh xu giong nhau, dung sai lech **D9** da ghi giay to (503 khi
+   * shared-user khong tra loi).
+   *
+   * KHONG ap dung cho cac ham GHI (`createUser`, `updateIdentity`,
+   * `revertCreatedUser`): ben goi con doc `error.response.status` de phan biet
+   * 400/409 (trung SDT) - boc lai se lam hong nhanh do.
+   */
+  private toReadError(error: unknown): never {
+    const status = (error as { response?: { status?: number } })?.response
+      ?.status;
+    if (status === 404) throw error;
+    throw new ServiceUnavailableException();
+  }
+
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
@@ -86,6 +120,17 @@ export class SharedUserServiceClient {
     return this.post<SharedUserLookupResponse>('internal/users', data);
   }
 
+  // Bu tru cho createUser (architect-http.md muc 1.2 quy tac 5): goi khi da
+  // tao identity thanh cong ben shared-user nhung buoc luu row cuc bo o
+  // trend that bai. Ben shared-user tra lai so dien thoai va tat isActive
+  // (khong xoa cung hang) - xem UserService.revertCreatedIdentityById.
+  revertCreatedUser(id: string): Promise<SharedUserLookupResponse> {
+    return this.post<SharedUserLookupResponse>(
+      `internal/users/${id}/revert-create`,
+      {},
+    );
+  }
+
   // Tra ve null neu shared-user khong co user voi phonenumber nay (404),
   // nem loi cho moi truong hop khac (mang, signature sai, 5xx...).
   async lookupByPhonenumber(
@@ -100,7 +145,7 @@ export class SharedUserServiceClient {
       );
     } catch (error) {
       if (error?.response?.status === 404) return null;
-      throw error;
+      this.toReadError(error);
     }
   }
 
@@ -118,7 +163,7 @@ export class SharedUserServiceClient {
       );
     } catch (error) {
       if (error?.response?.status === 404) return null;
-      throw error;
+      this.toReadError(error);
     }
   }
 
@@ -143,26 +188,37 @@ export class SharedUserServiceClient {
   // duoc dong nao khop.
   async lookupByIds(ids: string[]): Promise<SharedUserLookupResponse[]> {
     if (!ids.length) return [];
-    return this.post<SharedUserLookupResponse[]>(
-      'internal/users/batch-lookup',
-      {
-        ids,
-      },
-    );
+    try {
+      return await this.post<SharedUserLookupResponse[]>(
+        'internal/users/batch-lookup',
+        {
+          ids,
+        },
+      );
+    } catch (error) {
+      this.toReadError(error);
+    }
   }
 
   // Dung cho job batch cuoi ngay (UserScheduler.syncRecentlyRegisteredUsers)
   // - lay danh sach user tao trong khoang [createdFrom, createdTo) de tao
   // row lazy cho khach chua tung dang nhap, xem
   // issuses/sync-user-data-with-role.md muc 6.
-  listRecent(
+  async listRecent(
     createdFrom: Date,
     createdTo: Date,
   ): Promise<SharedUserLookupResponse[]> {
-    return this.post<SharedUserLookupResponse[]>('internal/users/list-recent', {
-      createdFrom: createdFrom.toISOString(),
-      createdTo: createdTo.toISOString(),
-    });
+    try {
+      return await this.post<SharedUserLookupResponse[]>(
+        'internal/users/list-recent',
+        {
+          createdFrom: createdFrom.toISOString(),
+          createdTo: createdTo.toISOString(),
+        },
+      );
+    } catch (error) {
+      this.toReadError(error);
+    }
   }
 
   // Moi path, ke ca /internal/*, deu mang tien to api/${version} - phai

@@ -94,8 +94,18 @@ export class CardOrderSubscriber
       );
     }
 
-    const timeoutId = setTimeout(async () => {
-      await this.handleCancel(entity.slug);
+    // Bat buoc phai co `.catch`: callback chay ngoai moi request nen khong ai
+    // bat ho, ma `handleCancel` nem loi theo dung thiet ke khi don da bi xoa
+    // hoac khong con `pending`. De nguyen thi thanh unhandled rejection va
+    // Node 18 giet ca tien trinh (da xay ra that 04/09/2026).
+    const timeoutId = setTimeout(() => {
+      this.handleCancel(entity.slug).catch((error) => {
+        this.logger.error(
+          `Error when cancelling card order ${entity.slug}: ${error?.message}`,
+          error?.stack,
+          context,
+        );
+      });
     }, delay);
 
     if (!job) {
