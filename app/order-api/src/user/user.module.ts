@@ -22,6 +22,7 @@ import { UserBirthdayProducer } from './user-birthday.producer';
 import { UserBirthdayConsumer } from './user-birthday.consumer';
 import { CampaignModule } from 'src/campaign/campaign.module';
 import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
+import { UserProvisioningModule } from './user-provisioning.module';
 
 @Module({
   imports: [
@@ -38,6 +39,9 @@ import { SharedUserServiceModule } from 'src/external-services/shared-user-servi
     ZaloOaConnectorModule,
     CampaignModule,
     SharedUserServiceModule,
+    // QD19 - UserService (lop 1) va UserScheduler (lop 3) dung chung
+    // `ensureLocalUser` voi JwtStrategy (lop 0).
+    UserProvisioningModule,
     BullModule.registerQueue({
       name: QueueRegisterKey.USER_BIRTHDAY,
     }),

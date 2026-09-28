@@ -19,6 +19,18 @@ import {
   Repository,
 } from 'typeorm';
 import { User } from './user.entity';
+import { UserProvisioningService } from './user-provisioning.service';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import { QueueRegisterKey } from 'src/app/app.constants';
+import {
+  LOOKUP_ON_MISS_PHONENUMBER_PATTERN,
+  LOOKUP_ON_MISS_TIMEOUT_MS,
+  SYNC_RECENT_USERS_THROTTLE_KEY,
+  SYNC_RECENT_USERS_THROTTLE_SECONDS,
+  SYNC_RECENT_USERS_TIMEOUT_MS,
+  SYNC_RECENT_USERS_WINDOW_MINUTES,
+} from './user.constant';
 import { InjectMapper } from '@automapper/nestjs';
 import { Mapper } from '@automapper/core';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
@@ -35,6 +47,8 @@ import {
   GetAccountRevenueQueryDto,
   GetAllUserQueryRequestDto,
   GetUserStatisticsQueryRequestDto,
+  LookupRecipientQueryRequestDto,
+  RecipientResponseDto,
   UpdateUserLanguageRequestDto,
   UpdateUserRequestDto,
   UpdateUserRoleRequestDto,
@@ -78,7 +92,14 @@ import moment from 'moment';
 import ExcelJS from 'exceljs';
 import { TransactionManagerService } from 'src/db/transaction-manager.service';
 import { CampaignAction } from 'src/campaign/campaign.constants';
-import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
+import {
+  SharedUserLookupResponse,
+  SharedUserServiceClient,
+} from 'src/external-services/shared-user-service/shared-user-service.client';
+
+// Ma loi `USER_NOT_FOUND` cua `shared-user` (user.validation.ts: 137000) -
+// nam trong BODY, HTTP status la 400. Xem toSharedUserCommandError.
+const SHARED_USER_USER_NOT_FOUND_CODE = 137000;
 
 @Injectable()
 export class UserService {
@@ -99,6 +120,12 @@ export class UserService {
     private readonly eventEmitter: EventEmitter2,
     private readonly branchUtils: BranchUtils,
     private readonly sharedUserServiceClient: SharedUserServiceClient,
+    // QD19 - MOT duong tao hang user cuc bo dung chung cho ca bon lop.
+    private readonly userProvisioningService: UserProvisioningService,
+    // Dung lai Redis da co san cho Redlock, chi de lam throttle cua lop 1
+    // (khoa RIENG, khong dung chung voi khoa cua cron - xem QD21).
+    @InjectQueue(QueueRegisterKey.DISTRIBUTE_LOCK_JOB)
+    private readonly distributeLockJobQueue: Queue,
   ) {}
 
   private isTodayBirthday(dobDM: string): boolean {
@@ -608,9 +635,19 @@ export class UserService {
         lastName: requestData.lastName,
         dob: requestData.dob,
         isVerifiedPhonenumber: requestData.isVerifiedPhonenumber,
-        // shared-user van con rang buoc NOT NULL len role (chua tach hoan
-        // toan) - gui kem de qua duoc constraint, KHONG dung lam nguon that.
-        role: requestData.role,
+        // ==================================================================
+        // QD18 - DAY LA CHO DUY NHAT `trend` DICH ROLE CUA NO THANH CO
+        // TRUNG TINH. Giu no o mot cho, dung rai.
+        //
+        // `trend` khai bao: role dung chung cua no la `Customer`. Moi role
+        // khac la nhan vien/hang he thong => rieng cua trend.
+        //
+        // Cot dich (`owner_service`) la cot BAT BIEN, khong co duong thang
+        // 'trend' -> NULL. Gui `false` nham cho mot khach that la khoa cung
+        // ho vao rieng trend VINH VIEN. Xem architect-http.md muc 1.1 quy
+        // tac 6.
+        // ==================================================================
+        isShared: role.name === RoleEnum.Customer,
       });
     } catch (error) {
       this.logger.error(
@@ -624,12 +661,30 @@ export class UserService {
       throw error;
     }
 
-    const user = this.userRepository.create({
-      phonenumber: sharedUser.phonenumber,
-      sharedUserId: sharedUser.id,
-      role,
-      branch,
+    // QD19 - UPSERT, khong phai insert thuan. Giua hai buoc cua chinh lenh
+    // nay (tao identity o tren, luu hang cuc bo o duoi), lop 1 (sync-on-read)
+    // hoac lop 3 (cron) co the da keo dung nguoi vua tao ve va ghi mot hang
+    // cuc bo voi role `Customer` mac dinh. Insert thuan se vap unique
+    // constraint va bao loi cho nguoi bam nut - trong khi that ra moi thu
+    // deu on.
+    //
+    // `provisionedByAnotherLayer` con dung o nhanh rollback: neu hang cuc bo
+    // do LOP KHAC tao chu khong phai lenh nay, thi huy danh tinh la SAI -
+    // chi huy khi chinh lenh nay vua tao ra no (muc 1.2).
+    const existedLocalUser = await this.userRepository.findOne({
+      where: { sharedUserId: sharedUser.id },
     });
+    const provisionedByAnotherLayer = !!existedLocalUser;
+
+    const user =
+      existedLocalUser ??
+      this.userRepository.create({
+        phonenumber: sharedUser.phonenumber,
+        sharedUserId: sharedUser.id,
+      });
+    // Y dinh cua lenh tao thang ban role mac dinh ma lop khac vua gan.
+    user.role = role;
+    user.branch = branch;
 
     try {
       const createdUser = await this.userRepository.save(user);
@@ -652,11 +707,21 @@ export class UserService {
       // bao loi". Neu khong bu tru, so dien thoai do bi giu vinh vien ben
       // shared-user va admin khong bao gio tao lai duoc user nay (lan sau
       // se dinh USER_EXISTS tu chinh shared-user).
-      await this.rollbackSharedUserCreate(
-        sharedUser.id,
-        requestData.phonenumber,
-        context,
-      );
+      if (provisionedByAnotherLayer) {
+        // Hang cuc bo do LOP KHAC cua QD19 tao ra, khong phai lenh nay -
+        // huy danh tinh o shared-user la xoa mat mot nguoi dung that. Chi
+        // bao loi, khong bu tru.
+        this.logger.warn(
+          `Local user for sharedUserId=${sharedUser.id} was provisioned by another layer; skip identity rollback`,
+          context,
+        );
+      } else {
+        await this.rollbackSharedUserCreate(
+          sharedUser.id,
+          requestData.phonenumber,
+          context,
+        );
+      }
       throw new UserException(UserValidation.ERROR_CREATE_USER);
     }
   }
@@ -759,9 +824,367 @@ export class UserService {
     return this.mergeSharedUserIdentity(dto, sharedUser);
   }
 
+  /**
+   * QD19 LOP 1 - sync-on-read.
+   *
+   * Keo user tao ben `shared-user` trong 15 phut gan nhat ve va tao hang cuc
+   * bo cho ai chua co, **truoc khi** chay truy van cuc bo.
+   *
+   * ### Vi sao phai co, noi cho dung
+   * `getAllUsers` chi doc `user_tbl` cuc bo. Khach tu dang ky qua
+   * `shared-user` ma chua tung dang nhap vao `trend` thi **nhan vien tra
+   * khong ra**. Va o day khong phai "man hinh xem cho vui": chinh
+   * `getAllUsers` la thu bon O TIM KHACH dang dung (gio hang ban tai quay,
+   * thanh toan, nguoi nhan the qua, cac dialog gan the/nhom khach). Va lop 3
+   * la cron, tot nhat cung tre 10 phut - day la nhip bu cho khe do.
+   *
+   * ### Bon dieu kien, thieu cai nao cung hong
+   *
+   * 1. **THROTTLE 60 GIAY - quan trong hon ca timeout.** O tim khach co
+   *    debounce: go mot so dien thoai van ra 3-5 luot goi, nhan voi nhieu
+   *    may o quay gio cao diem la mot dong request deu dan chi de nghe
+   *    "khong co ai moi". `SET NX EX` tren Redis => dung 1 luot/60 giay cho
+   *    TOAN CUM. Cua so 15 phut van thua suc phu.
+   * 2. **Timeout ngan.** Day la duong nguoi dung dang cho go, khong phai
+   *    lenh goi nen - 2 giay la tran.
+   * 3. **FAIL-OPEN.** Goi hong/timeout => bo qua, tra ket qua cuc bo, log
+   *    `warn`. KHONG nem loi len.
+   * 4. **Dung lai `ensureLocalUser`** (khong viet vong insert thu hai) va
+   *    **loc `ownerService`** (khong keo nhan vien cua service khac ve).
+   *
+   * > ### Muc 3 la NGOAI LE CO CHU DICH cua muc 1.7
+   * > Moi duong khac quy loi `shared-user` thanh **503**. Cho nay co y
+   * > khong, vi no chi la nhip bu them, khong phai nguon du lieu chinh cua
+   * > response. **Ghi ro de lan ra sau khong ai "sua cho nhat quan".**
+   *
+   * Mot tinh chat tot, dang ghi: dong bo **theo thoi gian tao**, khong theo
+   * chuoi dang tim. Nen go nham so **khong de ra hang rac** - khac han
+   * phuong an "tim thay ai thi tao ho so nguoi do".
+   */
+  private async syncRecentSharedUsersOnRead(): Promise<void> {
+    const context = `${UserService.name}.${this.syncRecentSharedUsersOnRead.name}`;
+    try {
+      const redis = await this.distributeLockJobQueue.client;
+      // `SET NX EX` la mot lenh nguyen tu: ai set duoc thi nguoi do chay.
+      // Co tinh KHONG dung chung khoa Redlock voi cron (QD21) - dung chung
+      // thi lop 1 chan duoc cron va nguoc lai, bien hai co che doc lap
+      // thanh phu thuoc nhau, va luc dieu tra su co se khong con suy luan
+      // duoc "ai da chay, ai bi bo". Chay trung vai luot la VO HAI
+      // (idempotent) - re hon nhieu so voi mot co che khu trung kho hieu.
+      const acquired = await redis.set(
+        SYNC_RECENT_USERS_THROTTLE_KEY,
+        '1',
+        'EX',
+        SYNC_RECENT_USERS_THROTTLE_SECONDS,
+        'NX',
+      );
+      if (!acquired) return;
+
+      const now = new Date();
+      const from = new Date(
+        now.getTime() - SYNC_RECENT_USERS_WINDOW_MINUTES * 60 * 1000,
+      );
+      const recent = await this.sharedUserServiceClient.listRecent(from, now, {
+        timeout: SYNC_RECENT_USERS_TIMEOUT_MS,
+      });
+      if (!recent.length) return;
+
+      const { created, skippedForeign } =
+        await this.userProvisioningService.ensureLocalUsers(recent);
+      if (created || skippedForeign) {
+        this.logger.log(
+          `Sync-on-read provisioned ${created} local user(s), skipped ${skippedForeign} owned by another service`,
+          context,
+        );
+      }
+    } catch (error) {
+      // FAIL-OPEN co chu dich - xem ghi chu tren dau ham.
+      this.logger.warn(
+        `Sync-on-read skipped, falling back to local data only: ${error.message}`,
+        context,
+      );
+    }
+  }
+
+  /**
+   * QD19 LOP 1b - tra DUNG SDT khi tim cuc bo ra rong.
+   *
+   * Tra `true` khi da co hang cuc bo khop dung so vua go (ben goi truy van
+   * lai), `false` o moi truong hop con lai.
+   *
+   * ### Vi sao phai co, khi da co sync-on-read
+   * Sync-on-read chon nguoi **theo thoi gian** va bi throttle 60 giay toan
+   * cum, nen van co khe: khach vua dang ky tren app, ra quay ngay, nhan vien
+   * go so dung luc luot sync bi throttle (hoac `list-recent` timeout) => rong.
+   * Nhan vien bam "Tao khach moi" thi `POST /user` bao `USER_EXISTS` vi so da
+   * co ben shared-user - ket o ca hai dau. Day la thao tac o quay tan suat
+   * cao nhat, nen ham nay tra **dung nguoi dang can**, khong phu thuoc
+   * throttle hay cua so.
+   *
+   * ### Dieu kien, thieu cai nao cung hong
+   *
+   * 1. **Chi khi rong va go DU so** (`LOOKUP_ON_MISS_PHONENUMBER_PATTERN`).
+   *    Co ket qua => khong goi gi. Go do dang => khong goi. Khop TUYET DOI
+   *    nen go nham khong de ra hang rac.
+   * 2. **Loc role cua request phai chua `Customer`** (neu co loc): hang moi
+   *    luon la Customer, truy van lai voi loc role khac cung khong ra.
+   * 3. **Timeout ngan, FAIL-OPEN** - cung ngoai le co chu dich cua muc 1.7
+   *    nhu sync-on-read: loi => tra ket qua cuc bo (rong), log `warn`.
+   * 4. **Loc `ownerService`** (QD18) truoc, roi **dung lai `ensureLocalUser`**
+   *    - khong viet vong insert thu hai.
+   *
+   * KHONG throttle: no chi chay khi rong + du so, moi luot la mot lookup
+   * khop tuyet doi theo khoa. Throttle o day lai mo lai dung khe dang va.
+   */
+  private async provisionByExactPhonenumberOnMiss(
+    query: GetAllUserQueryRequestDto,
+  ): Promise<boolean> {
+    const context = `${UserService.name}.${this.provisionByExactPhonenumberOnMiss.name}`;
+
+    const phonenumber = query.phonenumber?.trim();
+    if (!phonenumber || !LOOKUP_ON_MISS_PHONENUMBER_PATTERN.test(phonenumber))
+      return false;
+    if (!_.isEmpty(query.role) && !query.role.includes(RoleEnum.Customer))
+      return false;
+
+    try {
+      const sharedUser = await this.sharedUserServiceClient.lookupByPhonenumber(
+        phonenumber,
+        { timeout: LOOKUP_ON_MISS_TIMEOUT_MS },
+      );
+      if (!sharedUser) return false;
+      if (!this.userProvisioningService.isProvisionable(sharedUser.ownerService))
+        return false;
+
+      const local =
+        await this.userProvisioningService.ensureLocalUser(sharedUser);
+
+      // Hang cuc bo DA CO tu truoc nhung SDT cuc bo khac SDT that (khach doi
+      // so ben shared-user) => truy van lai van rong. Khong tu sua o day (day
+      // la duong doc), chi keu len de con dieu tra.
+      if (local.phonenumber !== sharedUser.phonenumber) {
+        this.logger.warn(
+          `Local phonenumber of sharedUserId=${sharedUser.id} is stale, lookup-on-miss cannot surface it`,
+          context,
+        );
+        return false;
+      }
+
+      this.logger.log(
+        `Lookup-on-miss ensured local user for sharedUserId=${sharedUser.id}`,
+        context,
+      );
+      return true;
+    } catch (error) {
+      // FAIL-OPEN co chu dich - xem ghi chu tren dau ham.
+      this.logger.warn(
+        `Lookup-on-miss skipped, falling back to local data only: ${error.message}`,
+        context,
+      );
+      return false;
+    }
+  }
+
+  // Doi loi cua lenh GHI `resetPassword` / `toggleActive` sang loi ma
+  // `HttpExceptionFilter` bat duoc. Client co tinh KHONG boc hai lenh nay qua
+  // `toReadError`, nen neu nem nguyen loi axios thi no roi xuong bo xu ly mac
+  // dinh cua Nest va ra 500.
+  //
+  // `shared-user` bao "khong co user" bang HTTP 400 kem ma nghiep vu 137000
+  // trong body (AppException mac dinh 400), khong phai 404 - nen phai doc ma
+  // trong body. 404 giu lai phong khi ben kia doi sang tra dung status. Moi
+  // thu khac = shared-user khong thi hanh duoc lenh => 503.
+  private toSharedUserCommandError(error: unknown, context: string): never {
+    const response = (
+      error as {
+        response?: { status?: number; data?: { statusCode?: number } };
+      }
+    )?.response;
+    if (
+      response?.status === 404 ||
+      response?.data?.statusCode === SHARED_USER_USER_NOT_FOUND_CODE
+    ) {
+      throw new UserException(UserValidation.USER_NOT_FOUND);
+    }
+    this.logger.error(
+      `shared-user command failed: ${(error as Error)?.message}`,
+      (error as Error)?.stack,
+      context,
+    );
+    throw new ServiceUnavailableException();
+  }
+
+  /**
+   * QD16 - dat lai mat khau cho mot tai khoan, va **cua kiem quyen dat o day**.
+   *
+   * ### Vi sao route nay o `trend` chu khong o `shared-user`
+   *
+   * *Dat lai mat khau can quyen cua NGUOI RA QUYET DINH, ma quyen do nam o
+   * `trend`.* Ai duoc phep dat lai mat khau cua nguoi khac la cau hoi ve
+   * **chuc vu trong cua hang** (Manager/Admin/SuperAdmin) - du kien ay chi
+   * `trend` giu dung. De `shared-user` tu tra loi la bat no doan bang mot ban
+   * role khong ai cap nhat, va do chinh la co che sinh ra **R1**: admin vua
+   * duoc cap quyen qua `POST {trend}/user/role` bi **403 oan**.
+   *
+   * Nhan `slug` CUC BO cua `trend` - UI lay thang tu danh sach no da co. Day
+   * cung la thu xoa han **R6**: truoc day UI phai tra nguoc slug that ben
+   * `shared-user` bang `GET /user?phonenumber=`, ma route do khop CHUOI CON.
+   */
+  async resetPasswordForUser(slug: string) {
+    const context = `${UserService.name}.${this.resetPasswordForUser.name}`;
+    const user = await this.userRepository.findOne({ where: { slug } });
+    if (!user) throw new UserException(UserValidation.USER_NOT_FOUND);
+
+    try {
+      await this.sharedUserServiceClient.resetPassword(user.sharedUserId);
+    } catch (error) {
+      this.toSharedUserCommandError(error, context);
+    }
+    this.logger.log(
+      `Password reset requested for user ${slug} (sharedUserId=${user.sharedUserId})`,
+      context,
+    );
+  }
+
+  /**
+   * QD16 - khoa/mo khoa tai khoan. Cung ly do dat cua kiem quyen o day nhu
+   * `resetPasswordForUser`.
+   *
+   * > ### Day KHONG phai dao nguoc quyet dinh xoa route `toggle-active` cu
+   * > Route cu cua `trend` bi xoa vi no thao tac tren **cot `isActive` cuc bo
+   * > cua `trend`** - hai ban trang thai khong dong bo. Route nay **khong ghi
+   * > cot nao cua `trend`**: no doc trang thai hien tai TU `shared-user`, dao,
+   * > roi gui gia tri DICH sang `shared-user`. Trang thai khoa van chi co
+   * > **mot nguon that** la `shared_user_db`.
+   *
+   * Doc-roi-ghi chu khong goi mot lenh "toggle" o ben kia la co y: route noi
+   * bo nhan gia tri dich nen goi lai hai lan ra cung ket qua.
+   */
+  async toggleActiveUser(slug: string) {
+    const context = `${UserService.name}.${this.toggleActiveUser.name}`;
+    const user = await this.userRepository.findOne({ where: { slug } });
+    if (!user) throw new UserException(UserValidation.USER_NOT_FOUND);
+
+    const sharedUser = await this.sharedUserServiceClient.lookupById(
+      user.sharedUserId,
+    );
+    if (!sharedUser) throw new UserException(UserValidation.USER_NOT_FOUND);
+
+    let updated: SharedUserLookupResponse;
+    try {
+      updated = await this.sharedUserServiceClient.toggleActive(
+        user.sharedUserId,
+        !sharedUser.isActive,
+      );
+    } catch (error) {
+      this.toSharedUserCommandError(error, context);
+    }
+    this.logger.log(
+      `User ${slug} active status set to ${updated.isActive}`,
+      context,
+    );
+
+    const dto = this.mapper.map(user, User, UserResponseDto);
+    return this.mergeSharedUserIdentity(dto, updated);
+  }
+
+  /**
+   * QD16-bis - duong tra NGUOI NHAN the qua, danh cho tai khoan `Customer`.
+   *
+   * ### Vi sao co ham nay
+   *
+   * `GET /user` truoc day **khong co `@HasRoles`** nen bat ky tai khoan dang
+   * nhap nao, ke ca `Customer`, cung list duoc toan bo khach kem SDT / ho ten
+   * / email. Do 12/09/2026: mot tai khoan khach that goi ra **200 + 916
+   * khach**. Nay route do da gac, va **khong nhan `Customer`**.
+   *
+   * Nhung man KHACH co mot nhu cau that: mua the qua **tang cho nguoi khac**
+   * thi phai tra duoc nguoi nhan theo SDT. Nen tach mot duong HEP rieng thay
+   * vi noi rong lai cai route quan tri.
+   *
+   * ### Bon rang buoc, moi cai dong mot thu
+   *
+   * 1. **Khop TUYET DOI, khong khop chuoi con** - khop chuoi con chinh la rui
+   *    ro **R6**. Khong mo lai no o mot cua khac.
+   * 2. **Hoi `shared-user` truoc, khong tra cot `phonenumber` cuc bo** (muc
+   *    1.3 uu tien `id` + muc 1.6 khong them cho DOC moi vao cot identity cuc
+   *    bo). `lookup` cua `shared-user` von da khop tuyet doi.
+   * 3. **Toi da MOT nguoi, toi thieu field** - chi `slug` + `phonenumber` + ho
+   *    ten. KHONG email / dob / address / role / diem / vi.
+   * 4. **Loc ba loai khong phai nguoi nhan hop le:** hang sentinel khach vang
+   *    lai, danh tinh **thuoc service khac** (QD18), va nguoi khong phai
+   *    `Customer` o `trend`.
+   *
+   * ### Co tinh KHONG tao hang cuc bo o day
+   *
+   * Day la duong DOC ma nguoi goi co the la `Customer` - cho no tao hang la
+   * dua cho tai khoan quyen thap nhat mot don bay GHI. Nguoi dang ky o
+   * `shared-user` da duoc **QD19 lop 1 + lop 3** keo ve trong <= 10 phut, nen
+   * khe bo sot rat hep. Chua co hang cuc bo => tra rong.
+   *
+   * KHAC lop 1b (`provisionByExactPhonenumberOnMiss` trong getAllUsers): o do
+   * duoc tao hang vi route `GET /user` da gac, nguoi goi chac chan la nhan
+   * vien. Dung "sua cho nhat quan" hai cho nay.
+   */
+  async lookupRecipient(
+    query: LookupRecipientQueryRequestDto,
+  ): Promise<RecipientResponseDto[]> {
+    const context = `${UserService.name}.${this.lookupRecipient.name}`;
+
+    // Rang buoc 2: hoi shared-user, khop tuyet doi. Loi mang o day van ra 503
+    // theo muc 1.7 - day KHONG phai duong co ngoai le fail-open nhu
+    // sync-on-read, vi ket qua chinh cua response den tu lenh goi nay.
+    const sharedUser = await this.sharedUserServiceClient.lookupByPhonenumber(
+      query.phonenumber,
+    );
+    if (!sharedUser) return [];
+
+    // Rang buoc 4a: sentinel khach vang lai khong phai mot con nguoi. Nhan
+    // dien bang `phonenumber` - dung idiom cua giai doan 1; doi sang hang so
+    // `sharedUserId` la viec cua 2B2, chua lam.
+    if (sharedUser.phonenumber === 'default-customer') {
+      this.logger.warn(
+        `Recipient lookup hit the walk-in sentinel, ignored`,
+        context,
+      );
+      return [];
+    }
+
+    // Rang buoc 4b: QD18 - danh tinh rieng cua service khac khong duoc lo ra
+    // o day, y het cho khong duoc tu cap hang cuc bo.
+    if (!this.userProvisioningService.isProvisionable(sharedUser.ownerService))
+      return [];
+
+    const local = await this.userRepository.findOne({
+      where: { sharedUserId: sharedUser.id },
+      relations: ['role'],
+    });
+    // Chua co ho so o `trend` => coi nhu khong tim thay.
+    if (!local) return [];
+
+    // Rang buoc 4c: chi khach moi nhan the qua qua duong nay.
+    if (local.role?.name !== RoleEnum.Customer) return [];
+
+    return [
+      {
+        slug: local.slug,
+        phonenumber: sharedUser.phonenumber,
+        firstName: sharedUser.firstName,
+        lastName: sharedUser.lastName,
+      },
+    ];
+  }
+
   async getAllUsers(
     query: GetAllUserQueryRequestDto,
   ): Promise<AppPaginatedResponseDto<UserResponseDto>> {
+    // QD19 lop 1. Phai `await` XONG roi moi truy van - khong thi hang vua
+    // ghi chua nhin thay duoc va ca nhip bu thanh vo nghia o chinh luot goi
+    // nay. Va co tinh KHONG boc chung transaction voi truy van doc ben
+    // duoi: ghi phai commit doc lap, boc chung la giu khoa suot thoi gian
+    // cho mang.
+    await this.syncRecentSharedUsersOnRead();
+
     // Construct where options
     const whereOptions: FindOptionsWhere<User> = {};
     if (query.slug) whereOptions.slug = query.slug;
@@ -840,8 +1263,15 @@ export class UserService {
     }
 
     // Exec query
-    const [users, total] =
+    let [users, total] =
       await this.userRepository.findAndCount(findManyOptions);
+
+    // QD19 lop 1b - rong ma nhan vien da go DU mot SDT: tra dung nguoi do ben
+    // shared-user, cap hang cuc bo roi truy van lai. Chi ton chi phi khi
+    // KHONG thay; co ket qua thi khong goi gi them.
+    if (total === 0 && (await this.provisionByExactPhonenumberOnMiss(query))) {
+      [users, total] = await this.userRepository.findAndCount(findManyOptions);
+    }
 
     // Calculate total pages
     const page = query.hasPaging ? query.page : 1;

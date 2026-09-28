@@ -35,11 +35,20 @@ export class User extends Base {
   phonenumber: string;
 
   // Id that cua user ben shared-user (identity service) - dung de JwtStrategy
-  // map JWT payload.sub sang user cuc bo cua trend. Voi hang cu (truoc khi
-  // tach shared-user), migration backfill tam bang chinh id_column cua hang
-  // (khong phai id that) - se duoc dong bo lai sau; hang moi tro di (tao qua
-  // UserService.updateUserRole) luon duoc gan dung id that ngay tu dau. Luon
-  // co gia tri (NOT NULL tu sau migration backfill).
+  // map JWT payload.sub sang user cuc bo cua trend. Luon co gia tri (NOT NULL
+  // tu sau migration backfill v4.0.0-02).
+  //
+  // **Mot phan hang mang gia tri BANG CHINH `id_column` cua no, va do la
+  // DUNG** - khong phai no tam. Hai DB tach ra tu cung mot mono nen giu
+  // nguyen khoa chinh, vi the hang cu trung nhau o ca hai ben. Hang tao sau
+  // khi tach thi `id` cuc bo khac, con `sharedUserId` tro dung sang danh
+  // tinh that.
+  //
+  // Da do 05/09/2026: 723/723 hang tra ra mot hang co that ben
+  // `shared_user_db`, **0 mo coi** (trong do 175 hang thuoc dien trung khoa
+  // noi tren). Chu thich cu o day ghi *"backfill tam... se duoc dong bo lai
+  // sau"* - cau do SAI va lam nguoi doc sau tuong con no du lieu (rui ro
+  // R8, da bac bo). Xem progress/trend-api.md muc A1/A5.
   @AutoMap()
   @Column({ name: 'shared_user_id_column', unique: true })
   sharedUserId: string;

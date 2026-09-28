@@ -24,6 +24,7 @@ import { RegisterOtpToken } from './entity/register-otp-token.entity';
 import { ZaloOaConnectorModule } from 'src/zalo-oa-connector/zalo-oa-connector.module';
 import { SharedModule } from 'src/shared/shared.module';
 import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
+import { UserProvisioningModule } from 'src/user/user-provisioning.module';
 
 @Module({
   imports: [
@@ -51,6 +52,9 @@ import { SharedUserServiceModule } from 'src/external-services/shared-user-servi
     ZaloOaConnectorModule,
     SharedModule,
     SharedUserServiceModule,
+    // QD19 lop 0 - JwtStrategy tu cap hang cuc bo bang CHUNG mot
+    // `ensureLocalUser` voi ba lop con lai.
+    UserProvisioningModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, AuthProfile, AuthUtils],

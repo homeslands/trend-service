@@ -16,6 +16,11 @@ import { Queue } from 'bullmq';
 import { DistributeLockJobKey, QueueRegisterKey } from 'src/app/app.constants';
 import Redlock from 'redlock';
 import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { UserProvisioningService } from './user-provisioning.service';
+import {
+  SYNC_USERS_FAST_GRID_WINDOW_MINUTES,
+  SYNC_USERS_WIDE_GRID_WINDOW_HOURS,
+} from './user.constant';
 
 @Injectable()
 export class UserScheduler {
@@ -32,6 +37,8 @@ export class UserScheduler {
     @InjectQueue(QueueRegisterKey.DISTRIBUTE_LOCK_JOB)
     private readonly distributeLockJobQueue: Queue,
     private readonly sharedUserServiceClient: SharedUserServiceClient,
+    // QD19 - lop 3 dung CHUNG `ensureLocalUser` voi ba lop con lai.
+    private readonly userProvisioningService: UserProvisioningService,
   ) {
     this.saltOfRounds = this.configService.get<number>('SALT_ROUNDS');
   }
@@ -299,95 +306,129 @@ export class UserScheduler {
     }
   }
 
-  // Bu cho khoang tre cua lazy load thuan (JwtStrategy.createLocalUserWithDefaultRole,
-  // UserService.updateUserRole): khach da dang ky ben shared-user nhung chua
-  // tung dang nhap/duoc gan role o trend thi khong co row cuc bo, bi "mat
-  // trang" khoi GET /user/statistics. Job nay pull user tao trong ngay hom
-  // truoc tu shared-user roi tu tao row lazy (role Customer mac dinh) cho
-  // nhung ai chua co, giu dung createdAt that. Xem
-  // issuses/sync-user-data-with-role.md muc 6.
+  // ==========================================================================
+  // QD19 lop 3 + QD21 - HAI LUOI dinh ky, moi cai mot vai
+  //
+  //   Luoi nhanh  moi 10 phut   cua so [now-30m, now]   bat kip trong ngay
+  //   Luoi rong   1 lan/ngay 2h cua so [now-48h, now]   bu moi thu bo lo
+  //
+  // ### Vi sao phai co CA HAI, chu khong chi ha chu ky job cu xuong
+  //
+  // Ca hai deu dung **cua so co dinh tinh tu `now`**. Neu service chet (hoac
+  // cron hong) lau hon 30 phut, nguoi dang ky trong khoang do bi **bo sot
+  // vinh vien**: cron song lai chi quet [now-30m, now], **no khong biet minh
+  // da bo lo 4 tieng**, va khong ai backfill lai. Cua so phai rong hon
+  // khoang chet te nhat minh chap nhan duoc - 48 gio thi song sot qua mot
+  // ngay sap tron ven.
+  //
+  // Noi cho dung: chet >2 ngay, hoac chinh job 2h sang cung hong, thi **van
+  // sot** - no cung la cua so co dinh, chi to hon 96 lan. Day khong phai loi
+  // giai tuyet doi (cua so theo `lastRun` moi la), nhung lay ~90% gia tri
+  // voi ~10% cong suc.
+  // ==========================================================================
+
+  // LUOI NHANH. Chong lan 3 lan (chu ky 10 phut, cua so 30 phut) la CO Y -
+  // de khong roi nguoi o dung bien cua so: do tre dong ho, giao dich commit
+  // cham.
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async syncRecentlyRegisteredUsersFast() {
+    const context = `${UserScheduler.name}.${this.syncRecentlyRegisteredUsersFast.name}`;
+
+    const lock = await this.acquireSyncLock(
+      DistributeLockJobKey.SYNC_RECENTLY_REGISTERED_USERS_FAST,
+      1000 * 60 * 5, // 5 phut - du rong cho mot cua so 30 phut
+      context,
+    );
+    if (!lock) return;
+
+    try {
+      const to = new Date();
+      const from = new Date(
+        to.getTime() - SYNC_USERS_FAST_GRID_WINDOW_MINUTES * 60 * 1000,
+      );
+      const { created, skippedForeign, total } = await this.syncUserWindow(
+        from,
+        to,
+      );
+
+      // IM LANG khi khong co gi. Ban cu log muc `log` moi luot (ke ca
+      // "Found 0 recently registered user, skip"), moi 10 phut, mai mai -
+      // do la tieng on che mat moi thu khac.
+      if (created || skippedForeign) {
+        this.logger.log(
+          `Fast grid synced ${created}/${total} user(s), skipped ${skippedForeign} owned by another service`,
+          context,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error when running fast grid user sync`,
+        error.stack,
+        context,
+      );
+    } finally {
+      await lock.release();
+    }
+  }
+
+  // LUOI RONG. Giu nguyen chu ky 2h sang cua job cu, chi noi cua so tu
+  // "ca ngay hom qua" thanh 48 gio.
   @Cron(CronExpression.EVERY_DAY_AT_2AM)
   async syncRecentlyRegisteredUsers() {
     const context = `${UserScheduler.name}.${this.syncRecentlyRegisteredUsers.name}`;
 
-    // Nhieu replica cung chay job nay - chi 1 replica duoc thuc thi trong
-    // ngay hom do, tranh goi trung sang shared-user va race khi tao row.
-    const client = await this.distributeLockJobQueue.client;
-    const redlock = new Redlock([client]);
-    const key = DistributeLockJobKey.SYNC_RECENTLY_REGISTERED_USERS;
-    const ttl = 1000 * 60 * 5; // 5 minutes
-    let lock: any = null;
+    const lock = await this.acquireSyncLock(
+      DistributeLockJobKey.SYNC_RECENTLY_REGISTERED_USERS,
+      // TTL rieng, KHONG be nguyen 5 phut cua luoi nhanh: cua so 48 gio co
+      // the la vai nghin hang, chay lau hon 5 phut thi khoa het han giua
+      // chung va mot replica khac chen vao.
+      1000 * 60 * 30,
+      context,
+    );
+    if (!lock) return;
 
     try {
-      lock = await redlock.acquire([key], ttl);
-    } catch {
-      this.logger.log(
-        `Another replica is already running sync recently registered users, skip`,
-        context,
+      const to = new Date();
+      const from = new Date(
+        to.getTime() - SYNC_USERS_WIDE_GRID_WINDOW_HOURS * 60 * 60 * 1000,
       );
-      return;
-    }
-
-    try {
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
-      const yesterdayStart = new Date(todayStart);
-      yesterdayStart.setDate(yesterdayStart.getDate() - 1);
 
       this.logger.log(
-        `Sync users registered from ${yesterdayStart.toISOString()} to ${todayStart.toISOString()}`,
+        `Wide grid sync users registered from ${from.toISOString()} to ${to.toISOString()}`,
         context,
       );
 
-      const recentSharedUsers = await this.sharedUserServiceClient.listRecent(
-        yesterdayStart,
-        todayStart,
+      const { created, skippedForeign, total } = await this.syncUserWindow(
+        from,
+        to,
       );
 
-      if (!recentSharedUsers.length) {
-        this.logger.log(`Found 0 recently registered user, skip`, context);
-        return;
+      if (created > 0) {
+        // ==================================================================
+        // DAY MOI LA PHAN GIA TRI NHAT CUA JOB NAY, chu khong phai viec bu.
+        //
+        // Luoi rong thuong xuyen bu duoc nguoi nghia la **luoi nhanh dang
+        // hong ma khong ai biet**. Mot cai luoi an toan AM THAM va loi la
+        // cai luoi che mat van de that. Nen o day phai KEU LEN kem so
+        // luong - job ngay vua la luoi bu, vua la cam bien suc khoe cua
+        // luoi nhanh, ma khong ton them gi.
+        // ==================================================================
+        this.logger.warn(
+          `Wide grid had to provision ${created}/${total} user(s) - the 10-minute fast grid should have caught them. Check whether it is running.`,
+          context,
+        );
+      } else {
+        this.logger.log(
+          `Wide grid found nothing to provision out of ${total} user(s) - fast grid is healthy`,
+          context,
+        );
       }
-
-      const customerRole = await this.roleRepository.findOne({
-        where: { name: RoleEnum.Customer },
-      });
-      if (!customerRole) {
-        this.logger.warn(`Role ${RoleEnum.Customer} not found`, context);
-        return;
+      if (skippedForeign) {
+        this.logger.log(
+          `Wide grid skipped ${skippedForeign} user(s) owned by another service`,
+          context,
+        );
       }
-
-      let created = 0;
-      for (const sharedUser of recentSharedUsers) {
-        const existed = await this.userRepository.exists({
-          where: { sharedUserId: sharedUser.id },
-        });
-        if (existed) continue;
-
-        try {
-          const newUser = this.userRepository.create({
-            sharedUserId: sharedUser.id,
-            phonenumber: sharedUser.phonenumber,
-            role: customerRole,
-            createdAt: new Date(sharedUser.createdAt),
-          });
-          await this.userRepository.save(newUser);
-          created++;
-        } catch (error) {
-          // Race voi lazy load (JwtStrategy) chay dung luc user tu dang
-          // nhap - khong coi la loi, chi bo qua (row da duoc tao boi phia
-          // kia).
-          this.logger.warn(
-            `Insert local user raced or failed for sharedUserId=${sharedUser.id}: ${error.message}`,
-            context,
-          );
-        }
-      }
-
-      this.logger.log(
-        `Synced ${created}/${recentSharedUsers.length} recently registered user(s)`,
-        context,
-      );
     } catch (error) {
       this.logger.error(
         `Error when syncing recently registered users`,
@@ -396,6 +437,46 @@ export class UserScheduler {
       );
     } finally {
       await lock.release();
+    }
+  }
+
+  // Than chung cua hai luoi. Dung `ensureLocalUsers` - KHONG viet vong
+  // insert thu hai (xem UserProvisioningService: hang phong thu la unique
+  // constraint, khong phai `exists()`), va loc `ownerService` theo QD18.
+  private async syncUserWindow(
+    from: Date,
+    to: Date,
+  ): Promise<{ created: number; skippedForeign: number; total: number }> {
+    // Client tu phan trang - cua so 48 gio co the la vai nghin hang (QD21).
+    const recentSharedUsers = await this.sharedUserServiceClient.listRecent(
+      from,
+      to,
+    );
+    if (!recentSharedUsers.length) {
+      return { created: 0, skippedForeign: 0, total: 0 };
+    }
+    const { created, skippedForeign } =
+      await this.userProvisioningService.ensureLocalUsers(recentSharedUsers);
+    return { created, skippedForeign, total: recentSharedUsers.length };
+  }
+
+  // Hai luoi dung HAI KHOA RIENG (xem DistributeLockJobKey). Khong lay duoc
+  // khoa thi bo qua - replica khac dang chay.
+  private async acquireSyncLock(
+    key: string,
+    ttl: number,
+    context: string,
+  ): Promise<{ release: () => Promise<unknown> } | null> {
+    const client = await this.distributeLockJobQueue.client;
+    const redlock = new Redlock([client]);
+    try {
+      return await redlock.acquire([key], ttl);
+    } catch {
+      this.logger.log(
+        `Another replica is already running ${key}, skip`,
+        context,
+      );
+      return null;
     }
   }
 }

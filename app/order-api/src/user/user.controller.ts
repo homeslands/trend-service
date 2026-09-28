@@ -29,6 +29,8 @@ import {
   GetAccountRevenueQueryDto,
   GetAllUserQueryRequestDto,
   GetUserStatisticsQueryRequestDto,
+  LookupRecipientQueryRequestDto,
+  RecipientResponseDto,
   UpdateUserLanguageRequestDto,
   UpdateUserRequestDto,
   UpdateUserRoleRequestDto,
@@ -70,7 +72,33 @@ export class UserController {
     } as AppResponseDto<void>;
   }
 
+  // ⛔ LO HONG CUA GIAI DOAN 1 - VA 25/09/2026.
+  //
+  // Route nay TUNG khong co `@HasRoles`. `RolesGuard` cho qua khi thieu
+  // decorator, nen bat ky tai khoan dang nhap nao - **ke ca `Customer`** -
+  // cung list duoc toan bo nguoi dung kem SDT / ho ten / email. Do tren moi
+  // truong song 12/09/2026: token cua mot khach that goi ra **200 + 916
+  // khach**. Moi route quan tri khac trong chinh controller nay deu da gac;
+  // rieng no thi khong.
+  //
+  // Sau QD19 lop 1, route nay con **kich hoat sync-on-read**, tuc mot khach
+  // ep duoc `trend` goi sang `shared-user`. Throttle 60s toan cum chan muc
+  // khuech dai o 1 lenh/phut, nhung phan LO DU LIEU thi nguyen ven - nen phai
+  // gac, khong dua vao throttle. Lop 1b (tra dung SDT khi rong) con KHONG
+  // throttle - bo guard nay la khach do duoc SDT cua bat ky ai.
+  //
+  // KHONG gac duoc bang mot dong `@HasRoles(Manager, Admin, SuperAdmin)`: o
+  // tim nguoi nhan the qua o man KHACH cung goi vao day. Nen liet ke **moi
+  // role tru `Customer`**, va tach nhu cau that cua khach sang
+  // `GET /user/lookup-recipient` ngay ben duoi.
   @Get()
+  @HasRoles(
+    RoleEnum.Staff,
+    RoleEnum.Chef,
+    RoleEnum.Manager,
+    RoleEnum.Admin,
+    RoleEnum.SuperAdmin,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Retrieve all user' })
   @ApiResponseWithType({
@@ -90,6 +118,107 @@ export class UserController {
       timestamp: new Date().toISOString(),
       result,
     } as AppResponseDto<AppPaginatedResponseDto<UserResponseDto>>;
+  }
+
+  /**
+   * QD16-bis - duong tra NGUOI NHAN the qua: cua HEP thay cho `GET /user` o
+   * man KHACH.
+   *
+   * Khop SDT **tuyet doi** (khong khop chuoi con - do la rui ro R6), tra **toi
+   * da 1 nguoi** va **toi thieu field**. Nghiep vu day du + bon rang buoc:
+   * `UserService.lookupRecipient`.
+   *
+   * ⚠ Phai khai TRUOC `@Get(':slug')` - khong thi Nest bat `lookup-recipient`
+   * thanh mot `:slug`.
+   */
+  @Get('lookup-recipient')
+  @HasRoles(
+    RoleEnum.Customer,
+    RoleEnum.Staff,
+    RoleEnum.Chef,
+    RoleEnum.Manager,
+    RoleEnum.Admin,
+    RoleEnum.SuperAdmin,
+  )
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Look up one gift-card recipient by exact phone number',
+  })
+  @ApiResponseWithType({
+    status: HttpStatus.OK,
+    description: 'The recipient has been retrieved successfully',
+    type: RecipientResponseDto,
+    isArray: true,
+  })
+  async lookupRecipient(
+    @Query(new ValidationPipe({ transform: true, whitelist: true }))
+    query: LookupRecipientQueryRequestDto,
+  ): Promise<AppResponseDto<RecipientResponseDto[]>> {
+    const result = await this.userService.lookupRecipient(query);
+    return {
+      message: 'The recipient has been retrieved successfully',
+      statusCode: HttpStatus.OK,
+      timestamp: new Date().toISOString(),
+      result,
+    } as AppResponseDto<RecipientResponseDto[]>;
+  }
+
+  // QD16 - hai route quan tri nguoi dung chuyen tu `shared-user` ve day. Day
+  // la thu dong R1: admin vua duoc cap quyen qua `POST /user/role` truoc day
+  // bi 403 oan, vi `shared-user` gac bang mot ban `role_tbl` cua chinh no ma
+  // khong ai cap nhat.
+  //
+  // Chieu goi cu:  Client -> shared-user (gac bang @HasRoles cua shared-user)
+  // Chieu goi moi: Client -> trend (gac bang role cua trend) -> /internal/*
+  //
+  // Giu NGUYEN path va shape request/response cua hai route cu, de UI chi phai
+  // doi client chu khong phai doi type hay man hinh.
+  @Post(':slug/reset-password')
+  @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reset password of a user (delegates to shared-user)',
+  })
+  @ApiResponseWithType({
+    status: HttpStatus.OK,
+    description: 'User password has been reset successfully',
+    type: UserResponseDto,
+  })
+  async resetPassword(
+    @Param('slug') slug: string,
+  ): Promise<AppResponseDto<UserResponseDto>> {
+    await this.userService.resetPasswordForUser(slug);
+    return {
+      message: 'User password has been reset successfully',
+      statusCode: HttpStatus.OK,
+      timestamp: new Date().toISOString(),
+    } as AppResponseDto<UserResponseDto>;
+  }
+
+  // Khong nhan body - giu dung shape cua route cu ben `shared-user`. Viec dao
+  // trang thai lam o service (doc trang thai that tu `shared-user` roi gui gia
+  // tri DICH sang), khong phai o route noi bo.
+  @Patch(':slug/toggle-active')
+  @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Toggle user active status (delegates to shared-user)',
+  })
+  @ApiResponseWithType({
+    status: HttpStatus.OK,
+    description: 'User active status has been toggled successfully',
+    type: UserResponseDto,
+  })
+  async toggleActiveUser(
+    @Param('slug') slug: string,
+  ): Promise<AppResponseDto<UserResponseDto>> {
+    const result = await this.userService.toggleActiveUser(slug);
+    return {
+      message: 'User active status has been toggled successfully',
+      statusCode: HttpStatus.OK,
+      timestamp: new Date().toISOString(),
+      result,
+    } as AppResponseDto<UserResponseDto>;
   }
 
   @Post()
