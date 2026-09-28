@@ -737,3 +737,42 @@ export class BirthdayStrategyResponseDto {
   @ApiProperty()
   channelReceiver?: string;
 }
+
+/**
+ * QD16-bis - duong tra nguoi nhan the qua cho tai khoan KHACH.
+ *
+ * `GET /user` gio gac bang @HasRoles va **khong nhan `Customer`** (no tra ca
+ * danh sach khach kem SDT/email - khach khong duoc thay). Nhung man KHACH
+ * (`ClientGiftCardSheet` -> `ReceiversSection` -> `ReceiverForm` ->
+ * `RecipientSearchInput`) that su can tra mot nguoi nhan theo SDT.
+ *
+ * Nen tach mot duong HEP rieng:
+ * - khop **TUYET DOI**, khong phai `LIKE %...%` - chinh cai khop chuoi con la
+ *   rui ro **R6**, dung mo lai;
+ * - tra **toi da 1 nguoi**, khong phan trang, khong loc theo gi khac;
+ * - tra **toi thieu field**: du de hien mot dong chon nguoi nhan, het.
+ *   KHONG co email / dob / address / branch / role / diem / vi.
+ */
+export class LookupRecipientQueryRequestDto {
+  @ApiProperty({
+    description:
+      'So dien thoai NGUOI NHAN - khop tuyet doi, khong phai chuoi con',
+    example: '0912345678',
+  })
+  @IsNotEmpty({ message: INVALID_PHONENUMBER })
+  phonenumber: string;
+}
+
+export class RecipientResponseDto {
+  @ApiProperty()
+  slug: string;
+
+  @ApiProperty()
+  phonenumber: string;
+
+  @ApiProperty({ required: false })
+  firstName?: string;
+
+  @ApiProperty({ required: false })
+  lastName?: string;
+}
