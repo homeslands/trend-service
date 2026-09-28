@@ -3,6 +3,12 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import { signInternalRequest } from 'src/common/utils/internal-signature.util';
+import {
+  INTERNAL_LIST_RECENT_MAX_PAGES,
+  INTERNAL_LIST_RECENT_PAGE_SIZE,
+  INTERNAL_SERVICE_HEADER,
+  INTERNAL_SERVICE_NAME,
+} from 'src/common/constants/internal-api.constant';
 
 export interface PingResponse {
   from: string;
@@ -29,6 +35,15 @@ export interface SharedUserLookupResponse {
   isVerifiedEmail?: boolean;
   isVerifiedPhonenumber?: boolean;
   language?: string;
+  // QD18 - danh tinh dung chung vs rieng cua mot service:
+  //   null      = tai khoan dung chung (khach). trend duoc tu cap hang cuc
+  //               bo voi role Customer mac dinh cua no.
+  //   'trend'   = rieng cua trend - van tu cap duoc.
+  //   khac      = nhan vien cua SERVICE KHAC. KHONG duoc tu cap hang cuc bo,
+  //               va khong duoc cho dang nhap vao trend nhu khach.
+  // shared-user chi MO TA, quyet dinh nam o day (xem
+  // UserProvisioningService.isProvisionable).
+  ownerService?: string | null;
   // Ngay dang ky that ben shared-user - nguon duy nhat de ghi vao
   // user.createdAt khi tu tao row lazy cuc bo (KHONG dung gio tao row/gio
   // job chay), xem issuses/sync-user-data-with-role.md muc 6.3.
@@ -37,11 +52,19 @@ export interface SharedUserLookupResponse {
 
 // Chi gui thong tin identity (khong gui branch) - branch la du lieu cua
 // trend, shared_user_db co the da lech branch so voi trend_db tu luc tach.
-// `role` van phai gui vi schema User cua shared-user hien con rang buoc NOT
-// NULL len quan he role (chua tach hoan toan, xem "no ky thuat" trong
-// progress/shared-user.md giai doan 5) - chi la workaround cho constraint
-// hien tai, KHONG dung ban role nay lam nguon that; role that nam o trend,
-// duoc luu lai ngay sau khi goi xong (xem UserService.createUser ben trend).
+//
+// KHONG con gui `role` (QD15, giai doan 2 muc A3.2): `trend` va `shared-user`
+// co hai he phan quyen DOC LAP, trend khong duoc quyet role cua shared-user.
+// Ban truoc gui role kem vi tuong shared-user con rang buoc NOT NULL len cot
+// role - do la mot hieu nham nam ngay trong ma nguon: cot do luon la
+// `varchar(36) NULL`. Nay shared-user tu gan role mac dinh cua chinh no.
+//
+// Thay vao do la `isShared` (QD18) - co truong tinh, KHONG phai role:
+//   true  => owner_service = NULL  (tai khoan dung chung - khach that)
+//   false => owner_service = 'trend' (nhan vien/hang he thong cua trend)
+// Cot dich la cot BAT BIEN, gui sai la khoa cung mot danh tinh vao dung mot
+// service VINH VIEN. Xem ghi chu tai UserService.createUser ben trend - do
+// la CHO DUY NHAT trend dich role cua no thanh co trung tinh nay.
 export interface CreateSharedUserRequest {
   phonenumber: string;
   password: string;
@@ -49,7 +72,7 @@ export interface CreateSharedUserRequest {
   lastName?: string;
   dob?: string;
   isVerifiedPhonenumber?: boolean;
-  role: string;
+  isShared: boolean;
 }
 
 // Field identity co the sua qua UpdateIdentityRequest - KHONG co role/branch,
@@ -133,8 +156,12 @@ export class SharedUserServiceClient {
 
   // Tra ve null neu shared-user khong co user voi phonenumber nay (404),
   // nem loi cho moi truong hop khac (mang, signature sai, 5xx...).
+  //
+  // `timeout` cho duong NONG (lop 1b trong getAllUsers - nhan vien dang cho o
+  // quay), giong listRecent.
   async lookupByPhonenumber(
     phonenumber: string,
+    options?: { timeout?: number },
   ): Promise<SharedUserLookupResponse | null> {
     try {
       return await this.post<SharedUserLookupResponse>(
@@ -142,6 +169,7 @@ export class SharedUserServiceClient {
         {
           phonenumber,
         },
+        options?.timeout,
       );
     } catch (error) {
       if (error?.response?.status === 404) return null;
@@ -200,31 +228,89 @@ export class SharedUserServiceClient {
     }
   }
 
-  // Dung cho job batch cuoi ngay (UserScheduler.syncRecentlyRegisteredUsers)
-  // - lay danh sach user tao trong khoang [createdFrom, createdTo) de tao
-  // row lazy cho khach chua tung dang nhap, xem
-  // issuses/sync-user-data-with-role.md muc 6.
+  // Duong DONG BO USER CHINH giua hai service (QD19 + QD21): luoi nhanh 10
+  // phut, luoi rong 48 gio, va sync-on-read trong getAllUsers. Lay user tao
+  // trong khoang [createdFrom, createdTo] kem createdAt that.
+  //
+  // TU PHAN TRANG: cua so 48 gio co the la vai nghin hang sau mot dot su co.
+  // Lap cho toi khi tra ve it hon mot trang - va co chan tren so trang de
+  // mot loi phia ben kia (luon tra du `limit`) khong thanh vong lap vo tan.
+  //
+  // `timeout` truyen xuong cho duong NONG (sync-on-read trong getAllUsers):
+  // o day nguoi dung dang cho go, 1-2 giay la tran, khong phai 5 giay mac
+  // dinh cua cac lenh goi nen.
   async listRecent(
     createdFrom: Date,
     createdTo: Date,
+    options?: { timeout?: number; maxPages?: number },
   ): Promise<SharedUserLookupResponse[]> {
-    try {
-      return await this.post<SharedUserLookupResponse[]>(
-        'internal/users/list-recent',
-        {
-          createdFrom: createdFrom.toISOString(),
-          createdTo: createdTo.toISOString(),
-        },
-      );
-    } catch (error) {
-      this.toReadError(error);
+    const maxPages = options?.maxPages ?? INTERNAL_LIST_RECENT_MAX_PAGES;
+    const all: SharedUserLookupResponse[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      let batch: SharedUserLookupResponse[];
+      try {
+        batch = await this.post<SharedUserLookupResponse[]>(
+          'internal/users/list-recent',
+          {
+            createdFrom: createdFrom.toISOString(),
+            createdTo: createdTo.toISOString(),
+            limit: INTERNAL_LIST_RECENT_PAGE_SIZE,
+            offset: page * INTERNAL_LIST_RECENT_PAGE_SIZE,
+          },
+          options?.timeout,
+        );
+      } catch (error) {
+        this.toReadError(error);
+      }
+      all.push(...batch);
+      if (batch.length < INTERNAL_LIST_RECENT_PAGE_SIZE) return all;
     }
+    // Het tran trang ma van con du mot trang. Nem RA NGOAI vong try, de
+    // `toReadError` khong nuot mat thong diep - day khong phai loi mang, ma
+    // la dau hieu phia shared-user dang tra sai (vd lo `limit`), va nguoi di
+    // dieu tra can doc duoc dung cau nay.
+    throw new Error(
+      `list-recent exceeded ${maxPages} pages for window ${createdFrom.toISOString()}..${createdTo.toISOString()} - shared-user may be ignoring the limit/offset parameters`,
+    );
+  }
+
+  // QD16 - dat lai mat khau HO mot user, tra theo `id` that ben shared-user.
+  // Quyen da duoc kiem o trend (role cua trend) truoc khi goi vao day; route
+  // noi bo ben kia co tinh KHONG kiem quyen nua.
+  //
+  // La lenh GHI nen KHONG di qua toReadError: ben goi con doc
+  // error.response.status de phan biet 404 (khong co user) voi loi khac.
+  resetPassword(id: string): Promise<SharedUserLookupResponse> {
+    return this.post<SharedUserLookupResponse>(
+      `internal/users/${id}/reset-password`,
+      {},
+    );
+  }
+
+  // QD16 - khoa/mo khoa tai khoan. Truyen gia tri DICH (`isActive`), khong de
+  // ben kia tu dao: goi lai hai lan phai ra cung mot ket qua.
+  //
+  // Trang thai khoa van chi co MOT NGUON THAT la shared_user_db - trend khong
+  // ghi cot nao cua no o duong nay (khac han route toggle-active cu cua trend,
+  // thu da bi xoa vi ghi vao cot isActive cuc bo).
+  toggleActive(
+    id: string,
+    isActive: boolean,
+  ): Promise<SharedUserLookupResponse> {
+    return this.post<SharedUserLookupResponse>(
+      `internal/users/${id}/toggle-active`,
+      { isActive },
+    );
   }
 
   // Moi path, ke ca /internal/*, deu mang tien to api/${version} - phai
   // khop chinh xac voi path that su ma InternalApiGuard cua shared-user
   // nhan duoc (request.originalUrl), neu khong chu ky HMAC se sai.
-  private async post<T>(relativePath: string, body: unknown): Promise<T> {
+  private async post<T>(
+    relativePath: string,
+    body: unknown,
+    timeoutMs?: number,
+  ): Promise<T> {
     const baseUrl =
       this.configService.get<string>('SHARED_USER_API_URL') ||
       'http://localhost:8086';
@@ -243,10 +329,16 @@ export class SharedUserServiceClient {
 
     const { data } = await firstValueFrom(
       this.httpService.post<T>(`${baseUrl}${path}`, body, {
-        timeout: 5000,
+        timeout: timeoutMs ?? 5000,
         headers: {
           'X-Signature': signature,
           'X-Timestamp': timestamp,
+          // QD18 - ten service goi. shared-user ghi gia tri nay vao
+          // owner_service khi `isShared: false`. Co tinh lay tu header chu
+          // khong tu body, de mot service khong khai duoc hang thuoc ve
+          // service khac. KHONG nam trong chu ky HMAC - xem ghi chu tai
+          // INTERNAL_SERVICE_HEADER.
+          [INTERNAL_SERVICE_HEADER]: INTERNAL_SERVICE_NAME,
         },
       }),
     );

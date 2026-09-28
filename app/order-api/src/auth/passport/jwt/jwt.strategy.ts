@@ -14,13 +14,11 @@ import { User } from 'src/user/user.entity';
 import { Repository } from 'typeorm';
 import { CurrentUserDto } from 'src/user/user.dto';
 import { AuthUtils } from '../../auth.utils';
-import { Role } from 'src/role/role.entity';
-import { RoleEnum } from 'src/role/role.enum';
-import {
-  SharedUserLookupResponse,
-  SharedUserServiceClient,
-} from 'src/external-services/shared-user-service/shared-user-service.client';
+import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { UserValidation } from 'src/user/user.validation';
+import { UserException } from 'src/user/user.exception';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
+import { UserProvisioningService } from 'src/user/user-provisioning.service';
 
 const RELATIONS = [
   'role.permissions.authority.authorityGroup',
@@ -32,10 +30,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
-    @InjectRepository(Role)
-    private readonly roleRepository: Repository<Role>,
     private readonly authUtils: AuthUtils,
     private readonly sharedUserServiceClient: SharedUserServiceClient,
+    private readonly userProvisioningService: UserProvisioningService,
     @Inject(WINSTON_MODULE_NEST_PROVIDER)
     private readonly logger: Logger,
   ) {
@@ -86,7 +83,36 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // gian voi role Customer mac dinh, chan (block) request lai cho toi
       // khi tao xong, khong tra role=null nhu truoc nua. Xem thiet ke +
       // ly do tai issuses/sync-user-data-with-role.md.
-      user = await this.createLocalUserWithDefaultRole(sharedUser);
+      //
+      // Day la LOP 0 cua QD19, va dung chung `ensureLocalUser` voi ba lop
+      // con lai - khong nhan ban vong insert (xem UserProvisioningService).
+      //
+      // QD18: neu danh tinh nay thuoc ve mot SERVICE KHAC thi helper nem
+      // loi, va o day phai ra 401 - ho la nhan vien cua service khac, theo
+      // quy tac nghiep vu khong duoc dung nhu khach o trend.
+      try {
+        user = await this.userProvisioningService.ensureLocalUser(
+          sharedUser,
+          RELATIONS,
+        );
+      } catch (error) {
+        // CHI danh tinh cua service khac moi ra 401. Loi ha tang (DB tu
+        // choi, role Customer bi xoa) phai giu nguyen ma cua no - quy het
+        // ve 401 la bien mot su co he thong thanh "sai tai khoan", va
+        // nguoi di dieu tra se tim nham cho.
+        if (
+          error instanceof UserException &&
+          error.errorCodeValue?.code ===
+            UserValidation.USER_OWNED_BY_ANOTHER_SERVICE.code
+        ) {
+          this.logger.warn(
+            `Reject login: sharedUserId=${sharedUser.id} belongs to another service`,
+            context,
+          );
+          throw new UnauthorizedException();
+        }
+        throw error;
+      }
     }
 
     const scope = this.authUtils.buildScope(user);
@@ -100,48 +126,5 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       userId: user.id,
       scope: this.authUtils.parseScope(scope),
     } as CurrentUserDto;
-  }
-
-  private async createLocalUserWithDefaultRole(
-    sharedUser: SharedUserLookupResponse,
-  ): Promise<User> {
-    const context = `${JwtStrategy.name}.${this.createLocalUserWithDefaultRole.name}`;
-
-    const customerRole = await this.roleRepository.findOne({
-      where: { name: RoleEnum.Customer },
-    });
-    if (!customerRole) {
-      this.logger.error(`Role ${RoleEnum.Customer} not found`, null, context);
-      throw new ServiceUnavailableException();
-    }
-
-    try {
-      const newUser = this.userRepository.create({
-        sharedUserId: sharedUser.id,
-        phonenumber: sharedUser.phonenumber,
-        role: customerRole,
-        // Ngay dang ky that ben shared-user - KHONG de @CreateDateColumn tu
-        // sinh theo gio tao row nay (gio dang nhap lan dau, khong phai gio
-        // dang ky), xem issuses/sync-user-data-with-role.md muc 6.3.
-        createdAt: new Date(sharedUser.createdAt),
-      });
-      await this.userRepository.save(newUser);
-    } catch (error) {
-      // Race: 2 request dau tien cua cung 1 user toi gan nhau, ca 2 deu
-      // thay chua co row roi cung insert - 1 trong 2 se vi pham unique
-      // constraint (sharedUserId/phonenumber). Khong coi la loi, chi can
-      // doc lai row do request kia da tao thanh cong.
-      this.logger.warn(
-        `Insert local user raced or failed, re-reading: ${error.message}`,
-        context,
-      );
-    }
-
-    const user = await this.userRepository.findOne({
-      where: { sharedUserId: sharedUser.id },
-      relations: RELATIONS,
-    });
-    if (!user) throw new ServiceUnavailableException();
-    return user;
   }
 }
