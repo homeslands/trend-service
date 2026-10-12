@@ -753,12 +753,22 @@ export class UserService {
     }
   }
 
-  // Gan role cho 1 user cua shared-user (theo phonenumber, khoa dang nhap
-  // dung chung giua 2 he thong). Neu trend chua co local row cho nguoi nay
-  // (lan dau duoc admin cap quyen), tu tao 1 row toi gian gom sharedUserId +
-  // phonenumber + role - khong con flow "tao user + mat khau" rieng, vi
-  // identity/mat khau da thuoc ve shared-user.
-  async updateUserRole(requestData: UpdateUserRoleRequestDto) {
+  // Gan role cho 1 user da co hang cuc bo o trend. Nhan `slug` CUC BO (giong
+  // `terminal`) - UI lay slug thang tu danh sach no da co. Ban truoc tra hang
+  // cuc bo theo `phonenumber` trong body: trai muc 1.6 quy tac 3
+  // (architect-http.md) - cot identity sap drop o giai doan 8 va co the lech
+  // voi shared-user.
+  //
+  // QD20 - Customer la role DONG, chan du BA duong:
+  //   1. Customer -> nhan vien: CANNOT_UPDATE_CUSTOMER_ROLE;
+  //   2. role dich = Customer: CANNOT_ASSIGN_CUSTOMER_ROLE (137006), xet NGAY
+  //      sau khi tra role, TRUOC khi nhin hang cuc bo - ket qua khong duoc
+  //      phu thuoc hang cuc bo da co hay chua;
+  //   3. chua co hang cuc bo: tra theo slug cuc bo thi khong co hang = khong
+  //      co slug => USER_NOT_FOUND. Khong con duong nao tu tao hang voi role
+  //      dich o day (ban cu lam vay => race voi lop 1/3 cua QD19).
+  // Nhan vien moi di duong `POST /user` (createUser), khong di duong nay.
+  async updateUserRole(slug: string, requestData: UpdateUserRoleRequestDto) {
     const context = `${UserService.name}.${this.updateUserRole.name}`;
     const role = await this.roleRepository.findOne({
       where: {
@@ -767,12 +777,18 @@ export class UserService {
     });
     if (!role) throw new RoleException(RoleValidation.ROLE_NOT_FOUND);
 
-    let user = await this.userRepository.findOne({
-      where: { phonenumber: requestData.phonenumber },
+    if (role.name === RoleEnum.Customer) {
+      this.logger.warn(`Can not assign ${role.name} role`, context);
+      throw new UserException(UserValidation.CANNOT_ASSIGN_CUSTOMER_ROLE);
+    }
+
+    const user = await this.userRepository.findOne({
+      where: { slug },
       relations: ['role'],
     });
+    if (!user) throw new UserException(UserValidation.USER_NOT_FOUND);
 
-    if (user && user.role?.name === RoleEnum.Customer) {
+    if (user.role?.name === RoleEnum.Customer) {
       this.logger.warn(
         `Can not update customer role to ${role.name} role`,
         context,
@@ -780,29 +796,12 @@ export class UserService {
       throw new UserException(UserValidation.CANNOT_UPDATE_CUSTOMER_ROLE);
     }
 
-    // Uu tien tra cuu theo `id` neu da biet (architect-http.md muc 1.3) -
-    // `id` la khoa chinh that, on dinh hon `phonenumber` (co the doi qua
-    // completeUserRegistration). Da co row cuc bo (da tung gan role truoc
-    // do) thi dung thang sharedUserId da luu, chi fallback sang
-    // lookupByPhonenumber khi chua tung co row cuc bo (lan dau gan role,
-    // chua biet id).
-    const sharedUser = user
-      ? await this.sharedUserServiceClient.lookupById(user.sharedUserId)
-      : await this.sharedUserServiceClient.lookupByPhonenumber(
-          requestData.phonenumber,
-        );
+    // Tra theo `id` (architect-http.md muc 1.3) - `id` la khoa chinh that, on
+    // dinh hon `phonenumber` (co the doi qua completeUserRegistration).
+    const sharedUser = await this.sharedUserServiceClient.lookupById(
+      user.sharedUserId,
+    );
     if (!sharedUser) throw new UserException(UserValidation.USER_NOT_FOUND);
-
-    if (!user) {
-      user = this.userRepository.create({
-        phonenumber: sharedUser.phonenumber,
-        sharedUserId: sharedUser.id,
-        // Ngay dang ky that ben shared-user - KHONG de @CreateDateColumn tu
-        // sinh theo gio tao row nay (gio admin gan role, khong phai gio
-        // dang ky), xem issuses/sync-user-data-with-role.md muc 6.3.
-        createdAt: new Date(sharedUser.createdAt),
-      });
-    }
 
     try {
       user.role = role;
@@ -818,8 +817,8 @@ export class UserService {
     }
 
     const dto = this.mapper.map(user, User, UserResponseDto);
-    // Ghep identity - row cuc bo (nhat la khi vua tao lan dau) khong luu du
-    // firstName/lastName/..., phai lay tu lan lookup vua goi o tren (khong
+    // Ghep identity - row cuc bo khong phai nguon identity (muc 1.6), phai
+    // lay firstName/lastName/... tu lan lookup vua goi o tren (khong
     // goi lai lan 2) (architect-http.md muc 1.1 quy tac 4).
     return this.mergeSharedUserIdentity(dto, sharedUser);
   }
