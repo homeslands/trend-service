@@ -162,10 +162,6 @@ export class GeneralUserResponseDto extends BaseResponseDto {
 
 export class UpdateUserRoleRequestDto {
   @ApiProperty()
-  @IsNotEmpty({ message: INVALID_PHONENUMBER })
-  phonenumber: string;
-
-  @ApiProperty()
   @IsNotEmpty()
   role: string;
 }
