@@ -81,53 +81,13 @@ export class UserScheduler {
     this.logger.log(`Update user role successfully`, context);
   }
 
-  // Create super user if not exist
-  @Timeout(5000)
-  async initSuperAdmin() {
-    const context = `${UserScheduler.name}.${this.initSuperAdmin.name}`;
-    this.logger.log(`Initializing super admin...`, context);
-
-    const hasSuperAdmin = await this.userRepository.exists({
-      where: {
-        phonenumber: 'root',
-      },
-    });
-    if (hasSuperAdmin) {
-      this.logger.warn(`Super admin already existed...`, context);
-      return;
-    }
-
-    const role = await this.roleRepository.findOne({
-      where: {
-        name: RoleEnum.SuperAdmin,
-      },
-    });
-    if (!role) {
-      this.logger.warn(`Role ${RoleEnum.SuperAdmin} not found`, context);
-      return;
-    }
-
-    // Create supper admin
-    const superAdmin = new User();
-    const hashedPass = await bcrypt.hash('root', this.saltOfRounds);
-    Object.assign(superAdmin, {
-      role,
-      phonenumber: 'root',
-      firstName: 'Super',
-      lastName: 'Admin',
-      password: hashedPass,
-    } as User);
-    try {
-      await this.userRepository.save(superAdmin);
-      this.logger.log(`Super admin root/root created successfuly`, context);
-    } catch (error) {
-      this.logger.error(
-        `Error when creating super admin: ${error.message}`,
-        error.stack,
-        context,
-      );
-    }
-  }
+  // KHONG con `initSuperAdmin` (chot 11/10/2026, giong terminal - buoc 2.3).
+  // Ban cu la ban truoc khi tach: tu ghi `password`/`firstName`/`lastName` vao
+  // hang cuc bo va khong gan `sharedUserId` (cot NOT NULL) nen tren DB trang
+  // luon hong roi bi nuot trong `catch`. Moi moi truong di tiep tu DB dang
+  // chay, DB do da co hang `root` role SuperAdmin tro vao danh tinh `root` ben
+  // shared-user. Neu co luc phai dung DB trang thi tao tay hang cuc bo do -
+  // QD19 chi cap Customer, QD20 cam nang len.
 
   @Timeout(5000)
   async initDefaultCustomer() {
