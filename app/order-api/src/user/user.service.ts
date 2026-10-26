@@ -3,7 +3,6 @@ import {
   Inject,
   Injectable,
   Logger,
-  ServiceUnavailableException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -96,6 +95,7 @@ import {
   SharedUserLookupResponse,
   SharedUserServiceClient,
 } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { SharedUserUnavailableException } from 'src/external-services/shared-user-service/shared-user-service.exception';
 
 // Ma loi `USER_NOT_FOUND` cua `shared-user` (user.validation.ts: 137000) -
 // nam trong BODY, HTTP status la 400. Xem toSharedUserCommandError.
@@ -217,7 +217,7 @@ export class UserService {
         error?.stack,
         context,
       );
-      throw new ServiceUnavailableException();
+      throw new SharedUserUnavailableException();
     }
 
     // Co hang cuc bo nhung shared-user khong co danh tinh => nguoi nay khong
@@ -1010,7 +1010,7 @@ export class UserService {
       (error as Error)?.stack,
       context,
     );
-    throw new ServiceUnavailableException();
+    throw new SharedUserUnavailableException();
   }
 
   /**
@@ -1312,7 +1312,7 @@ export class UserService {
         error?.stack,
         `${UserService.name}.${this.getAllUsers.name}`,
       );
-      throw new ServiceUnavailableException();
+      throw new SharedUserUnavailableException();
     }
 
     return {

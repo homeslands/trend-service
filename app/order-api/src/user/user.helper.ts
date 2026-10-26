@@ -1,10 +1,11 @@
 import { Repository, In, IsNull } from 'typeorm';
-import { Logger, ServiceUnavailableException } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { User } from './user.entity';
 import {
   SharedUserLookupResponse,
   SharedUserServiceClient,
 } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { SharedUserUnavailableException } from 'src/external-services/shared-user-service/shared-user-service.exception';
 
 // Bo field dung de ghep vao createdBy (GeneralUserResponseDto) - CHI 3 field
 // nay, khong duoc them field khac vao day vi DTO dich chi khai bao dung 3
@@ -117,7 +118,7 @@ export const batchLookupSharedUserIdentities = async (
       error?.stack,
       context,
     );
-    throw new ServiceUnavailableException();
+    throw new SharedUserUnavailableException();
   }
 };
 

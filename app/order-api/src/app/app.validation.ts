@@ -49,6 +49,7 @@ import { VoucherValidation } from 'src/voucher/voucher.validation';
 import { WorkflowValidation } from 'src/workflow/workflow.validation';
 import { PrinterConnectorValidation } from 'src/printer-connector/printer-connector.validation';
 import { ZaloOaConnectorValidation } from 'src/zalo-oa-connector/zalo-oa-connector.validation';
+import { SharedUserServiceValidation } from 'src/external-services/shared-user-service/shared-user-service.validation';
 
 export type TErrorCodeValue = {
   code: number;
@@ -116,6 +117,7 @@ export const AppValidation: TErrorCode = {
   ...PrinterConnectorValidation,
   ...QrPaymentValidation,
   ...CampaignValidation,
+  ...SharedUserServiceValidation,
 };
 
 const errorCodeKeys = Object.keys(AppValidation);
