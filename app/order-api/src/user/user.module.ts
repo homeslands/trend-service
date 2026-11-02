@@ -10,7 +10,6 @@ import { Role } from 'src/role/role.entity';
 import { Branch } from 'src/branch/branch.entity';
 import { UserUtils } from './user.utils';
 import { SharedModule } from 'src/shared/shared.module';
-import { UserRequirement } from './user-requirement.entity';
 import { TransactionManagerService } from 'src/db/transaction-manager.service';
 import { BranchUtils } from 'src/branch/branch.utils';
 import { ZaloOaConnectorModule } from 'src/zalo-oa-connector/zalo-oa-connector.module';
@@ -30,7 +29,6 @@ import { UserProvisioningModule } from './user-provisioning.module';
       User,
       Role,
       Branch,
-      UserRequirement,
       ZaloOaConnectorConfig,
       ZaloOaConnectorHistory,
     ]),
