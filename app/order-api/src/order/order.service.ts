@@ -1272,9 +1272,6 @@ export class OrderService {
           name: RoleEnum.Customer,
         },
       },
-      relations: {
-        userRequirements: true,
-      },
     });
 
     // Get owner
@@ -1283,14 +1280,11 @@ export class OrderService {
     // });
     let owner = await this.userRepository.findOne({
       where: { slug: data.owner ?? IsNull() },
-      relations: {
-        userRequirements: true,
-      },
     });
     if (!owner) owner = defaultCustomer;
 
-    await this.userActiveChecker.assertActive(owner);
-    checkUserRequirement(owner);
+    const ownerIdentity = await this.userActiveChecker.assertActive(owner);
+    checkUserRequirement(ownerIdentity?.userRequirements);
 
     // Get cashier
     // let approvalBy = await this.userUtils.getUser({
@@ -1753,7 +1747,7 @@ export class OrderService {
       where: { slug },
       relations: {
         payment: true,
-        owner: { role: true, userRequirements: true },
+        owner: { role: true },
         approvalBy: true,
         orderItems: {
           variant: { size: true, product: true },

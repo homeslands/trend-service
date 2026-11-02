@@ -3,7 +3,6 @@ import {
   Inject,
   Injectable,
   Logger,
-  ServiceUnavailableException,
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -94,8 +93,14 @@ import { TransactionManagerService } from 'src/db/transaction-manager.service';
 import { CampaignAction } from 'src/campaign/campaign.constants';
 import {
   SharedUserLookupResponse,
+  SharedUserRequirement,
   SharedUserServiceClient,
 } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { SharedUserUnavailableException } from 'src/external-services/shared-user-service/shared-user-service.exception';
+import {
+  toMembershipCardResponse,
+  toUserRequirementResponses,
+} from 'src/external-services/shared-user-service/shared-user-shape.mapper';
 
 // Ma loi `USER_NOT_FOUND` cua `shared-user` (user.validation.ts: 137000) -
 // nam trong BODY, HTTP status la 400. Xem toSharedUserCommandError.
@@ -153,6 +158,7 @@ export class UserService {
       isVerifiedEmail?: boolean;
       isVerifiedPhonenumber?: boolean;
       isActive?: boolean;
+      userRequirements?: SharedUserRequirement[];
     } | null,
   ): UserResponseDto {
     // `isActive` gan RIENG va gan LUON, ke ca khi khong co identity - KHONG
@@ -171,6 +177,12 @@ export class UserService {
     // xac thuc duoc (JwtStrategy tra theo sharedUserId roi chan neu khong
     // thay), nen "khong dung duoc" mo ta dung trang thai cua no.
     dto.isActive = identity?.isActive ?? false;
+    // ⚠ KHONG gan `userRequirements` o day. Ham nay la diem merge dung chung
+    // cua 8 route, ma truoc buoc 2.5 chi `GET /user` (danh sach) nap quan he
+    // requirement - `GET /user/:slug` va 6 route kia KHONG co field do. Gan o
+    // day la them field vao ca 8, tuc doi shape ngoai chu dich (muc 1.4;
+    // `response-shape.spec.ts` bat dung cho nay ngay 26/10/2026).
+    // Noi gan: `getAllUsers`, canh `membershipCard`.
     if (!identity) return dto;
     return Object.assign(dto, {
       phonenumber: identity.phonenumber ?? dto.phonenumber,
@@ -217,7 +229,7 @@ export class UserService {
         error?.stack,
         context,
       );
-      throw new ServiceUnavailableException();
+      throw new SharedUserUnavailableException();
     }
 
     // Co hang cuc bo nhung shared-user khong co danh tinh => nguoi nay khong
@@ -425,32 +437,38 @@ export class UserService {
     const context = `${UserService.name}.${this.completeUserRegistration.name}`;
     const user = await this.userRepository.findOne({
       where: { slug: userSlug },
-      relations: { userRequirements: true },
     });
     if (!user) throw new UserException(UserValidation.USER_NOT_FOUND);
 
-    const blockedPhonenumberRequirement = user.userRequirements.find(
+    // QD22 (buoc 2.5): requirement o shared-user. Doc qua `lookup`, khong doc
+    // bang cuc bo nua. Fail-closed - khong tra loi duoc thi 503, khong duoc
+    // doan la "khong co requirement" roi cho di tiep.
+    const identity = await this.sharedUserServiceClient.lookupById(
+      user.sharedUserId,
+    );
+    if (!identity) throw new UserException(UserValidation.USER_NOT_FOUND);
+
+    const blockedPhonenumberRequirement = (
+      identity.userRequirements ?? []
+    ).find(
       (requirement) =>
         requirement.key === UserRequirementKey.NEED_UPDATE_PHONE_NUMBER &&
         requirement.status === UserRequirementStatus.PENDING &&
         requirement.level === UserRequirementLevel.BLOCK &&
         requirement.scope === UserRequirementScope.INITIAL,
     );
-    // const blockedPasswordRequirement = user.userRequirements.find(
-    //   (requirement) =>
-    //     requirement.key === UserRequirementKey.NEED_UPDATE_PASSWORD &&
-    //     requirement.status === UserRequirementStatus.PENDING &&
-    //     requirement.level === UserRequirementLevel.BLOCK &&
-    //     requirement.scope === UserRequirementScope.INITIAL,
-    // );
 
-    // Dung de rollback shared-user (architect-http.md muc 1.2 buoc 3) neu
-    // buoc luu cuc bo o duoi that bai sau khi da doi SDT thanh cong ben
-    // shared-user. Chi set khi thuc su da ghi thanh cong sang shared-user.
-    let oldPhonenumberForRollback: string | null = null;
+    // Ket qua that su cua lenh ghi xa - nguon de chep xuong cot guong.
+    let updated: SharedUserLookupResponse | null = null;
 
     if (blockedPhonenumberRequirement) {
-      if (user.phonenumber === requestData.phonenumber) {
+      // So voi SDT THAT ben shared-user (`identity`), KHONG so voi cot guong
+      // cuc bo. Cot guong duoc phep cu (khach doi so o service khac, lop bu
+      // chua chay) - so nham thi: cuc bo thay "co doi", shared-user thay
+      // "khong doi" => no BO QUA ca khoi, requirement KHONG duoc COMPLETED,
+      // ma client van nhan 204 "hoan tat thanh cong". Khach bi chan tiep ma
+      // khong hieu vi sao.
+      if (identity.phonenumber === requestData.phonenumber) {
         this.logger.warn(
           AuthValidation.NEED_UPDATE_PHONE_NUMBER.message,
           context,
@@ -476,11 +494,11 @@ export class UserService {
         // check cuc bo va luc goi - thi khong duoc luu ban cuc bo, tranh 2
         // ben lech nhau). Check cuc bo o tren chi la fast-fail, khong phai
         // nguon that.
-        const oldPhonenumber = user.phonenumber;
         try {
-          await this.sharedUserServiceClient.updateIdentity(user.sharedUserId, {
-            phonenumber: requestData.phonenumber,
-          });
+          updated = await this.sharedUserServiceClient.updateIdentity(
+            user.sharedUserId,
+            { phonenumber: requestData.phonenumber },
+          );
         } catch (error) {
           this.logger.error(
             `Error updating phonenumber on shared-user: ${error.message}`,
@@ -494,43 +512,23 @@ export class UserService {
             AuthValidation.ERROR_COMPLETE_USER_REGISTRATION,
           );
         }
-        // Da ghi thanh cong sang shared-user - tu day tro di neu buoc luu
-        // cuc bo phia duoi that bai, PHAI rollback ve SDT cu nay
-        // (architect-http.md muc 1.2 buoc 3).
-        oldPhonenumberForRollback = oldPhonenumber;
+        // Ghi guong theo RESPONSE, khong theo `requestData`: chep dung cai
+        // shared-user DA LUU, khong phai cai minh XIN luu.
         Object.assign(user, {
-          phonenumber: requestData.phonenumber,
+          phonenumber: updated.phonenumber,
         });
-        blockedPhonenumberRequirement.status = UserRequirementStatus.COMPLETED;
+        // KHONG danh dau requirement o day nua (QD22, buoc 2.5):
+        // `update-identity` cua shared-user tu chuyen
+        // NEED_UPDATE_PHONE_NUMBER sang COMPLETED khi SDT doi - cung mot
+        // transaction voi chinh phep doi SDT, nen khong con canh "doi SDT
+        // xong ma requirement con PENDING".
       }
     }
 
-    // if (blockedPasswordRequirement) {
-    //   const isMatch = await bcrypt.compare(requestData.password, user.password);
-    //   if (isMatch) {
-    //     this.logger.warn(AuthValidation.NEED_UPDATE_PASSWORD.message, context);
-    //     throw new AuthException(AuthValidation.NEED_UPDATE_PASSWORD);
-    //   } else {
-    //     const hashedPass = await bcrypt.hash(
-    //       requestData.password,
-    //       this.saltOfRounds,
-    //     );
-    //     Object.assign(user, {
-    //       password: hashedPass,
-    //     });
-    //     blockedPasswordRequirement.status = UserRequirementStatus.COMPLETED;
-    //   }
-    // }
-
-    // if (!blockedPhonenumberRequirement && !blockedPasswordRequirement) {
-    //   this.logger.error(
-    //     `User ${user.slug} has no blocked requirement`,
-    //     context,
-    //   );
-    //   throw new AuthException(
-    //     AuthValidation.USER_NOT_HAVE_ANY_REQUIREMENT_MUST_BE_COMPLETED,
-    //   );
-    // }
+    // QD22.d (buoc 2.5) - DA XOA hai khoi da comment ve khoa mat khau (doi mat
+    // khau tai cho + nhanh "khong co requirement nao"). Chung chet tu truoc khi
+    // tach service, va tu 2.5 thi khoa NEED_UPDATE_PASSWORD duoc go o luong
+    // QUEN MAT KHAU ben shared-user (`auth.service.ts`), khong phai o day.
     if (!blockedPhonenumberRequirement) {
       this.logger.error(
         `User ${user.slug} has no blocked phone number requirement`,
@@ -555,47 +553,59 @@ export class UserService {
     // day la viec can quyet dinh rieng, khong phai sua tien tay o day. Xem
     // progress/trend-api.md muc "Bo sung (2026-09-04)".
 
-    try {
-      await this.transactionManagerService.execute<void>(
-        async (manager) => {
-          await manager.save(user);
-          if (blockedPhonenumberRequirement) {
-            await manager.save(blockedPhonenumberRequirement);
-          }
-          // if (blockedPasswordRequirement) {
-          //   await manager.save(blockedPasswordRequirement);
-          // }
-        },
-        () => {
-          this.logger.log(
-            `User ${user.slug} registration has been completed`,
-            context,
-          );
-        },
-        (error) => {
-          this.logger.warn(
-            `Error when completing user registration: ${error.message}`,
-            context,
-          );
-          throw new AuthException(
-            AuthValidation.ERROR_COMPLETE_USER_REGISTRATION,
-          );
-        },
-      );
-    } catch (error) {
-      // Rollback (architect-http.md muc 1.2 buoc 3): shared-user da doi SDT
-      // thanh cong nhung buoc luu cuc bo that bai - phai tra SDT ve gia tri
-      // cu ben shared-user, khong duoc de 2 ben lech nhau.
-      if (oldPhonenumberForRollback) {
-        await this.rollbackSharedUserIdentity(
-          user.sharedUserId,
-          { phonenumber: oldPhonenumberForRollback },
-          { phonenumber: requestData.phonenumber },
+    // Ghi guong. Hong thi KHONG bu tru lui (doi tu buoc 2.5).
+    await this.transactionManagerService.execute<void>(
+      async (manager) => {
+        // Chi con hang `user` cuc bo (cot `phonenumber` con song toi GD8).
+        // Requirement da do shared-user tu dong trong `update-identity`.
+        await manager.save(user);
+      },
+      () => {
+        this.logger.log(
+          `User ${user.slug} registration has been completed`,
           context,
         );
-      }
-      throw error;
-    }
+      },
+      (error) => {
+        // KHONG nem - ca chu dich, khong phai bo sot.
+        // `TransactionManagerService.execute` da rollback truoc khi goi callback
+        // nay va CHI nem tiep neu callback nem. Khong nem nghia la: guong khong
+        // ghi duoc, nhung request van THANH CONG (204).
+        //
+        // Vi sao khong bu tru ve shared-user:
+        // - Lenh ghi duy nhat o day la cot `phonenumber_column` cuc bo - mot
+        //   GUONG cua shared-user, song toi GD8 (doi ten 8.9, drop 10.3). Su
+        //   that DA ghi dung: khach that su da doi SDT, va requirement da
+        //   COMPLETED trong cung transaction do ben shared-user.
+        // - SAI huong: huy mot lenh ghi da thanh cong vao nguon su that chi vi
+        //   cap nhat guong hong;
+        // - KHONG DU: `update-identity` con mot hieu ung phu la dat requirement
+        //   ve COMPLETED, ma lenh bu tru (chi ghi lai phonenumber) khong mo lai
+        //   duoc - bu tru xong van lech;
+        // - DAP LEN NGUOI KHAC: giua luc ta ghi va luc ta bu tru, mot luot khac
+        //   co the da doi SDT sang gia tri thu ba; ghi de "gia tri cu" len do la
+        //   lost update tren chinh du lieu dang nhap.
+        //
+        // ⚠ GUONG KHONG TU SUA. Do lai 31/10/2026:
+        // `UserProvisioningService.provisionLocalUser` thoat som khi hang da ton
+        // tai (`if (existed) return`), nen lop 1 (sync-on-read) va lop 3 (cron)
+        // cua QD19 CHI TAO hang thieu, KHONG cap nhat hang cu. Khong co lop nao
+        // keo cot nay ve - no lech cho toi khi GD8 drop cot.
+        //
+        // Hau qua thuc te, chi MOT cho: TIM KHACH THEO SDT
+        // (`GET /user?phonenumber=` loc `Like` tren cot guong) se khong ra nguoi
+        // nay khi tra bang so MOI. Lop 1b cua QD19 phat hien duoc ca nay nhung
+        // co y khong sua ("Local phonenumber ... is stale, lookup-on-miss cannot
+        // surface it").
+        // Moi cho khac KHONG anh huong: response nao cung ghep identity tu
+        // shared-user (`mergeSharedUserIdentity`) nen so hien ra luon dung.
+        this.logger.error(
+          `[MIRROR-LAG] local phonenumber mirror NOT written for ${user.slug} (shared-user already stored ${updated?.phonenumber}); local phone search will miss this customer until stage 8: ${error?.message}`,
+          error?.stack,
+          context,
+        );
+      },
+    );
   }
 
   // Tao user moi: trend quyet dinh role/branch (nghiep vu cua no), sau do
@@ -935,6 +945,65 @@ export class UserService {
    * KHONG throttle: no chi chay khi rong + du so, moi luot la mot lookup
    * khop tuyet doi theo khoa. Throttle o day lai mo lai dung khe dang va.
    */
+  /**
+   * Trang rong dung shape cua `getAllUsers` - dung khi loc theo ma the mà
+   * khong co the nao mang ma do (QD22.a, buoc 2.5).
+   */
+  private emptyUserPage(
+    query: GetAllUserQueryRequestDto,
+  ): AppPaginatedResponseDto<UserResponseDto> {
+    const page = query.hasPaging ? query.page : 1;
+    return {
+      hasNext: false,
+      hasPrevios: false,
+      items: [],
+      total: 0,
+      page,
+      pageSize: query.hasPaging ? query.size : 0,
+      totalPages: 0,
+    } as AppPaginatedResponseDto<UserResponseDto>;
+  }
+
+  /**
+   * Cap hang cuc bo cho mot `sharedUserId` truoc khi loc theo no (QD22.a).
+   * The dung chung giua hai order service, nen chu the co the chua tung dang
+   * nhap vao trend => chua co hang cuc bo => loc ra rong oan.
+   *
+   * Fail-open: cap hang khong duoc thi cu loc tiep (ra rong) - dung nhu khi
+   * chua co hang. Khong nem, vi day la duong doc va `GET /user` con cho
+   * nhan vien tim nguoi khac.
+   */
+  private async provisionLocalUserForSharedId(
+    sharedUserId: string,
+  ): Promise<void> {
+    const context = `${UserService.name}.${this.provisionLocalUserForSharedId.name}`;
+    try {
+      const existed = await this.userRepository.findOne({
+        where: { sharedUserId },
+        select: { id: true },
+      });
+      if (existed) return;
+
+      const sharedUser =
+        await this.sharedUserServiceClient.lookupById(sharedUserId);
+      if (!sharedUser) return;
+      if (
+        !this.userProvisioningService.isProvisionable(sharedUser.ownerService)
+      )
+        return;
+      await this.userProvisioningService.ensureLocalUser(sharedUser);
+      this.logger.log(
+        `Ensured local user for membership-card holder sharedUserId=${sharedUserId}`,
+        context,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Could not ensure local user for membership-card holder sharedUserId=${sharedUserId}: ${error?.message}`,
+        context,
+      );
+    }
+  }
+
   private async provisionByExactPhonenumberOnMiss(
     query: GetAllUserQueryRequestDto,
   ): Promise<boolean> {
@@ -1010,7 +1079,7 @@ export class UserService {
       (error as Error)?.stack,
       context,
     );
-    throw new ServiceUnavailableException();
+    throw new SharedUserUnavailableException();
   }
 
   /**
@@ -1195,10 +1264,23 @@ export class UserService {
         name: In(query.role),
       };
 
+    // QD22.a (buoc 2.5) - loc khach theo ma the. Truoc day JOIN bang the cuc
+    // bo; nay tra `/internal/membership-cards/lookup` theo `{ code }` roi loc
+    // bang `sharedUserId`. Quet RFID o quay va tab quan ly khach dua vao day.
+    //
+    // Khong thay the => tra trang rong ngay, khong truy van tiep: `whereOptions`
+    // khong co dieu kien nao ve the nua, nen de di tiep la tra ca bang.
+    //
+    // The co the duoc phat o service kia (dung chung - QD22) nen chu the chua
+    // chac co hang cuc bo; cap qua UserProvisioningService truoc khi loc.
     if (query.membershipCard) {
-      whereOptions.membershipCard = {
-        code: query.membershipCard,
-      };
+      const card =
+        await this.sharedUserServiceClient.lookupMembershipCardByCode(
+          query.membershipCard,
+        );
+      if (!card?.userId) return this.emptyUserPage(query);
+      await this.provisionLocalUserForSharedId(card.userId);
+      whereOptions.sharedUserId = card.userId;
     }
 
     if (query.startDate && query.endDate) {
@@ -1247,9 +1329,7 @@ export class UserService {
         branch: true,
         role: true,
         accumulatedPoint: true,
-        membershipCard: true,
         balance: true,
-        userRequirements: true,
       },
       where: whereOptions,
       order: { createdAt: 'DESC' },
@@ -1299,12 +1379,29 @@ export class UserService {
       const identityById = new Map(
         identities.map((identity) => [identity.id, identity]),
       );
+      // QD22 (buoc 2.5) - field `membershipCard` cua ca trang: MOT luot batch
+      // nua, khong goi lookup rieng tung dong (muc 1.1 quy tac 4). Nguoi khong
+      // co the thi vang mat trong ket qua => `null` sau khi map.
+      const cards =
+        await this.sharedUserServiceClient.lookupMembershipCardsByUserIds(
+          sharedUserIds,
+        );
+      const cardByUserId = new Map(cards.map((card) => [card.userId, card]));
       // Goi merge cho MOI dong, ke ca dong khong tra cuu duoc identity:
       // chinh nhanh `if (identity)` cu la cho tai khoan bi khoa lot qua voi
       // `isActive` cuc bo con nguyen.
       items.forEach((dto, index) => {
         const identity = identityById.get(users[index].sharedUserId);
         this.mergeSharedUserIdentity(dto, identity ?? null);
+        dto.membershipCard = toMembershipCardResponse(
+          cardByUserId.get(users[index].sharedUserId),
+        );
+        // Chi route nay co field `userRequirements` tu truoc 2.5 (no nap quan
+        // he; cac route user khac thi khong) - gan dung o day de khong doi
+        // shape cua route khac, xem ghi chu o `mergeSharedUserIdentity`.
+        dto.userRequirements = toUserRequirementResponses(
+          identity?.userRequirements,
+        );
       });
     } catch (error) {
       this.logger.error(
@@ -1312,7 +1409,7 @@ export class UserService {
         error?.stack,
         `${UserService.name}.${this.getAllUsers.name}`,
       );
-      throw new ServiceUnavailableException();
+      throw new SharedUserUnavailableException();
     }
 
     return {
