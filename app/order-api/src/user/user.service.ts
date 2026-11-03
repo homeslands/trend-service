@@ -23,6 +23,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QueueRegisterKey } from 'src/app/app.constants';
 import {
+  DEFAULT_CUSTOMER_SHARED_ID,
   LOOKUP_ON_MISS_PHONENUMBER_PATTERN,
   LOOKUP_ON_MISS_TIMEOUT_MS,
   SYNC_RECENT_USERS_THROTTLE_KEY,
@@ -1207,10 +1208,13 @@ export class UserService {
     );
     if (!sharedUser) return [];
 
-    // Rang buoc 4a: sentinel khach vang lai khong phai mot con nguoi. Nhan
-    // dien bang `phonenumber` - dung idiom cua giai doan 1; doi sang hang so
-    // `sharedUserId` la viec cua 2B2, chua lam.
-    if (sharedUser.phonenumber === 'default-customer') {
+    // Rang buoc 4a: sentinel khach vang lai khong phai mot con nguoi.
+    //
+    // So THANG voi hang so, khong goi `isDefaultCustomer`: doi tuong o day la
+    // danh tinh lay tu `shared-user` - khoa cua no la `id`, khong co
+    // `sharedUserId`. Dua no vao helper thi helper doc `sharedUser.sharedUserId`
+    // (field khong ton tai) va NEM LOI (buoc 2.6, 2.7).
+    if (sharedUser.id === DEFAULT_CUSTOMER_SHARED_ID) {
       this.logger.warn(
         `Recipient lookup hit the walk-in sentinel, ignored`,
         context,
