@@ -1671,7 +1671,13 @@ export class UserService {
     const onlyNewCustomers =
       (hasStartDate || hasEndDate) &&
       query.customerType === AccountRevenueCustomerType.NEW_REGISTER;
-    const params: string[] = [branch.id];
+    // THU TU LA HOP DONG, khong phai gu. `?` la VI TRI chu khong phai ten:
+    // hai phan tu dau phai khop hai `?` co dinh dau `accountRevenueFromWhereClause`
+    // (`o.branch_column`, roi `u.shared_user_id_column`), moi `params.push`
+    // duoi day khop mot `?` CO DIEU KIEN theo dung thu tu chung xuat hien
+    // trong cau. Chen sai cho thi cau van chay, van ra so, va **so do sai** -
+    // khong co exception nao. Them `?` moi thi them vao day DUNG VI TRI cua no.
+    const params: string[] = [branch.id, DEFAULT_CUSTOMER_SHARED_ID];
 
     // 'YYYY-MM-DDTHH:mm:ss' local time → MySQL datetime literal
     const startParam = query.startDate?.replace('T', ' ');
