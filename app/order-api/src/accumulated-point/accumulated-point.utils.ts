@@ -13,14 +13,10 @@ export function calculateAccumulatedPoints(
   return Math.floor((orderTotal * percentage) / 100);
 }
 
-/**
- * Check if user is default customer
- * @param phoneNumber Phone number of user
- * @returns true if user is default customer
- */
-export function isDefaultCustomer(phoneNumber: string): boolean {
-  return phoneNumber === 'default-customer';
-}
+// `isDefaultCustomer` da chuyen sang `src/user/user.constant.ts` o buoc 2.6:
+// no nhan dien theo `sharedUserId` chu khong theo `phonenumber`, va phai roi
+// thu muc nay vi `accumulated-point/` bi xoa o giai doan 8 trong khi
+// `user-active.checker.ts` - mot trong hai nguoi goi - thi o lai.
 
 /**
  * Check if user is customer
