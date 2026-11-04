@@ -125,10 +125,12 @@ export const SYNC_USERS_WIDE_GRID_WINDOW_HOURS = 48;
 // y het failure mode ay, chi khac dieu kien: hang so doi DU LIEU phai khop MA,
 // env doi ENV phai khop DU LIEU. Ca hai deu hong lang le.
 //
-// Khac biet that: sentinel duoc tao boi `initDefaultCustomer` bang UUID NGAU
-// NHIEN (khong migration nao seed no), nen mot moi truong khong di len tu ban
-// mono se mang id khac. Sua bang env la mot dong cau hinh; sua bang cach ep id
-// o `shared-user` la doi KHOA CHINH cua mot hang co 18 khoa ngoai tro vao.
+// Khac biet that: hang sentinel dang chay DUOC TAO boi `initDefaultCustomer`
+// (da xoa o buoc 2.9) bang UUID NGAU NHIEN, nen mot moi truong khong di len tu
+// ban mono se mang id khac. Sua bang env la mot dong cau hinh; sua bang cach ep
+// id o `shared-user` la doi KHOA CHINH cua mot hang co 18 khoa ngoai tro vao.
+// Tu buoc 2.10, moi truong dung MOI lay hang sentinel tu migration (id co dinh
+// = gia tri mac dinh duoi day), nen env chi con can o moi truong CU co id lech.
 //
 // `|| mac dinh` chu khong `??`: bien khai rong (`DEFAULT_CUSTOMER_SHARED_ID=`)
 // phai roi ve mac dinh, khong duoc thanh chuoi rong.
