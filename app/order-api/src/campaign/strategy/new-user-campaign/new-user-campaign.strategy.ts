@@ -13,7 +13,7 @@ import { VoucherProduct } from 'src/voucher-product/voucher-product.entity';
 import { Product } from 'src/product/product.entity';
 import { DataSource, In } from 'typeorm';
 import { SharedPointTransactionService } from 'src/shared/services/shared-point-transaction.service';
-import { CreatePointTransactionDto } from 'src/gift-card-modules/point-transaction/dto/create-point-transaction.dto';
+import { CreatePointTransactionPayload } from 'src/shared/interfaces/commons/shared-point-transaction.interface';
 import {
   PointTransactionObjectTypeEnum,
   PointTransactionTypeEnum,
@@ -271,14 +271,18 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
 
     // 2. Credit the user's balance, then record the point transaction (same
     // order as the gift-card redeem flow).
+    // MOT nguon khoa cho ca ba lenh duoi day (buoc 2.12/2.13 — 2C): lay tu
+    // ban ghi `user` da tra san o tren, khong tra lai va khong doc cot slug.
+    const sharedUserId = user.sharedUserId;
+
     await this.sharedBalanceService.calcBalance({
-      userSlug: user.slug,
+      sharedUserId,
       points: grantedCoin,
       type: PointTransactionTypeEnum.IN,
     });
 
     const currentBalance = await this.sharedBalanceService.findOneByField({
-      userSlug: user.slug,
+      sharedUserId,
       slug: null,
     });
 
@@ -288,9 +292,9 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
       objectType: PointTransactionObjectTypeEnum.CAMPAIGN,
       objectSlug: campaign.slug,
       points: grantedCoin,
-      userSlug: user.slug,
+      sharedUserId,
       balance: currentBalance.points,
-    } as CreatePointTransactionDto);
+    } satisfies CreatePointTransactionPayload);
 
     this.logger.log(
       `[NEW_USER][COIN] ${grantedCoin} coins credited to user ${user.id} via campaign ${campaign.slug}`,
