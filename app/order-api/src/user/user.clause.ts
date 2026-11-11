@@ -30,8 +30,13 @@ const accountRevenueFromWhereClause = (
     -- Only orders owned by customers with a registered account
     AND
         r.name_column = 'CUSTOMER'
+    -- Exclude the walk-in sentinel. This is the SECOND positional parameter,
+    -- right after o.branch_column and BEFORE every conditional one below, so
+    -- the caller's params array must read [branch.id, DEFAULT_CUSTOMER_SHARED_ID]
+    -- and push the rest after it. shared_user_id_column is NOT NULL, so the
+    -- != comparison never collapses to NULL and never silently drops a row.
     AND
-        u.phonenumber_column != 'default-customer'
+        u.shared_user_id_column != ?
     -- Exclude transactions created by cashiers
     AND
         (o.approval_by_column IS NULL OR ar.name_column != 'CASHIER')

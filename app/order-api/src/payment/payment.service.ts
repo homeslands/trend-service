@@ -66,6 +66,7 @@ import { PrinterConnectorUtils } from 'src/printer-connector/printer-connector.u
 import { PrinterUtils } from 'src/printer/printer.utils';
 import { QrPaymentService } from 'src/qr-payment/qr-payment.service';
 import { User } from 'src/user/user.entity';
+import { isDefaultCustomer } from 'src/user/user.constant';
 
 @Injectable()
 export class PaymentService {
@@ -508,7 +509,7 @@ export class PaymentService {
     const order = await this.orderUtils.getOrder({
       where: { slug: createPaymentDto.orderSlug },
     });
-    if (order.owner?.phonenumber !== 'default-customer') {
+    if (!isDefaultCustomer(order.owner)) {
       this.logger.error('Initiate public payment denied', null, context);
       throw new PaymentException(
         PaymentValidation.INITIATE_PUBLIC_PAYMENT_DENIED,

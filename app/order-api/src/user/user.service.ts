@@ -23,6 +23,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QueueRegisterKey } from 'src/app/app.constants';
 import {
+  DEFAULT_CUSTOMER_SHARED_ID,
   LOOKUP_ON_MISS_PHONENUMBER_PATTERN,
   LOOKUP_ON_MISS_TIMEOUT_MS,
   SYNC_RECENT_USERS_THROTTLE_KEY,
@@ -1207,10 +1208,13 @@ export class UserService {
     );
     if (!sharedUser) return [];
 
-    // Rang buoc 4a: sentinel khach vang lai khong phai mot con nguoi. Nhan
-    // dien bang `phonenumber` - dung idiom cua giai doan 1; doi sang hang so
-    // `sharedUserId` la viec cua 2B2, chua lam.
-    if (sharedUser.phonenumber === 'default-customer') {
+    // Rang buoc 4a: sentinel khach vang lai khong phai mot con nguoi.
+    //
+    // So THANG voi hang so, khong goi `isDefaultCustomer`: doi tuong o day la
+    // danh tinh lay tu `shared-user` - khoa cua no la `id`, khong co
+    // `sharedUserId`. Dua no vao helper thi helper doc `sharedUser.sharedUserId`
+    // (field khong ton tai) va NEM LOI (buoc 2.6, 2.7).
+    if (sharedUser.id === DEFAULT_CUSTOMER_SHARED_ID) {
       this.logger.warn(
         `Recipient lookup hit the walk-in sentinel, ignored`,
         context,
@@ -1667,7 +1671,13 @@ export class UserService {
     const onlyNewCustomers =
       (hasStartDate || hasEndDate) &&
       query.customerType === AccountRevenueCustomerType.NEW_REGISTER;
-    const params: string[] = [branch.id];
+    // THU TU LA HOP DONG, khong phai gu. `?` la VI TRI chu khong phai ten:
+    // hai phan tu dau phai khop hai `?` co dinh dau `accountRevenueFromWhereClause`
+    // (`o.branch_column`, roi `u.shared_user_id_column`), moi `params.push`
+    // duoi day khop mot `?` CO DIEU KIEN theo dung thu tu chung xuat hien
+    // trong cau. Chen sai cho thi cau van chay, van ra so, va **so do sai** -
+    // khong co exception nao. Them `?` moi thi them vao day DUNG VI TRI cua no.
+    const params: string[] = [branch.id, DEFAULT_CUSTOMER_SHARED_ID];
 
     // 'YYYY-MM-DDTHH:mm:ss' local time → MySQL datetime literal
     const startParam = query.startDate?.replace('T', ' ');

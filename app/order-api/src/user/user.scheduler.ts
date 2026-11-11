@@ -2,12 +2,10 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { User } from './user.entity';
 import { Repository } from 'typeorm';
-import { Cron, CronExpression, Timeout } from '@nestjs/schedule';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Role } from 'src/role/role.entity';
 import { RoleEnum } from 'src/role/role.enum';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
-import * as bcrypt from 'bcrypt';
-import { ConfigService } from '@nestjs/config';
 import { UserBirthdayProducer } from './user-birthday.producer';
 import { CampaignService } from 'src/campaign/campaign.service';
 import { CampaignType } from 'src/campaign/campaign.constants';
@@ -24,14 +22,12 @@ import {
 
 @Injectable()
 export class UserScheduler {
-  private saltOfRounds: number;
   constructor(
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     @InjectRepository(Role)
     private readonly roleRepository: Repository<Role>,
     @Inject(WINSTON_MODULE_NEST_PROVIDER) private readonly logger: Logger,
-    private readonly configService: ConfigService,
     private readonly userBirthdayProducer: UserBirthdayProducer,
     private readonly campaignService: CampaignService,
     @InjectQueue(QueueRegisterKey.DISTRIBUTE_LOCK_JOB)
@@ -39,9 +35,7 @@ export class UserScheduler {
     private readonly sharedUserServiceClient: SharedUserServiceClient,
     // QD19 - lop 3 dung CHUNG `ensureLocalUser` voi ba lop con lai.
     private readonly userProvisioningService: UserProvisioningService,
-  ) {
-    this.saltOfRounds = this.configService.get<number>('SALT_ROUNDS');
-  }
+  ) {}
 
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async updateUserRole() {
@@ -89,52 +83,22 @@ export class UserScheduler {
   // shared-user. Neu co luc phai dung DB trang thi tao tay hang cuc bo do -
   // QD19 chi cap Customer, QD20 cam nang len.
 
-  @Timeout(5000)
-  async initDefaultCustomer() {
-    const context = `${UserScheduler.name}.${this.initDefaultCustomer.name}`;
-    this.logger.log(`Initializing default customer...`, context);
+  // KHONG con `initDefaultCustomer` (buoc 2.9, chot 03/11/2026) - ban nay HONG
+  // san, khong chi la "khong con can":
+  // - No chen hang MA KHONG GAN `sharedUserId`, ma `shared_user_id_column` la
+  //   cot NOT NULL => `save()` luon nem tren DB trang, roi loi bi NUOT vao
+  //   `catch` va chi con mot dong log.
+  // - No nhan dien sentinel bang `phonenumber` va de DB tu sinh `id`, nen hai
+  //   service dung mot DB moi khong the co cung id sentinel - dung thu 2B2 vua
+  //   bo di.
+  // Viec "bao dam co hang sentinel" chuyen han sang MIGRATION o buoc 2.10.
+  //
+  // Dong `bcrypt.hash('default-customer', …)` trong than ham la cho GHI
+  // `password_column` CUOI CUNG cua `trend` - cung voi viec xoa `initSuperAdmin`
+  // (2.3) va doi duong tao the (2.5). Vi vay `bcrypt`, `saltOfRounds` va
+  // `ConfigService` het nguoi doc trong tep nay va da go theo; `roleRepository`
+  // va `RoleEnum` thi O LAI, `updateUserRole` phia tren con dung.
 
-    const hasDefaultCustomer = await this.userRepository.exists({
-      where: {
-        phonenumber: 'default-customer',
-      },
-    });
-    if (hasDefaultCustomer) {
-      this.logger.warn(`Default customer already existed...`, context);
-      return;
-    }
-
-    const role = await this.roleRepository.findOne({
-      where: {
-        name: RoleEnum.Customer,
-      },
-    });
-    if (!role) {
-      this.logger.warn(`Role ${RoleEnum.Customer} not found`, context);
-      return;
-    }
-
-    // Create default customer
-    const defaultCustomer = new User();
-    const hashedPass = await bcrypt.hash('default-customer', this.saltOfRounds);
-    Object.assign(defaultCustomer, {
-      role,
-      phonenumber: 'default-customer',
-      firstName: 'Default',
-      lastName: 'Customer',
-      password: hashedPass,
-    } as User);
-    try {
-      await this.userRepository.save(defaultCustomer);
-      this.logger.log(`Default customer created successfuly`, context);
-    } catch (error) {
-      this.logger.error(
-        `Error when creating default customer: ${error.message}`,
-        error.stack,
-        context,
-      );
-    }
-  }
   // Return tomorrow's day-month (DDMM). Birthday greetings are sent one day
   // ahead, so we match users whose birthday is tomorrow. Adding a day to the
   // Date handles month/year rollover (e.g. 31/12 -> 01/01, 28/02 -> 01/03).
