@@ -26,6 +26,7 @@ import { CreatePointTransactionPayload } from 'src/shared/interfaces/commons/sha
 import { InvoiceAction } from 'src/invoice/invoice.constants';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AccumulatedPointService } from 'src/accumulated-point/accumulated-point.service';
+import { orderRef } from 'src/shared/constants/service-ref.constant';
 
 @Injectable()
 export class JobService {
@@ -142,7 +143,10 @@ export class JobService {
 
         // confirm use accumulated points
         try {
-          await this.accumulatedPointService.confirmPointsUsage(order.id);
+          // Buoc 2.15 — 2C: tham chieu `trend:<orderSlug>`, khong phai id cuc bo.
+          await this.accumulatedPointService.confirmPointsUsage(
+            orderRef(order.slug),
+          );
           this.logger.log(
             `Confirmed points usage for order ${order.slug}`,
             context,
