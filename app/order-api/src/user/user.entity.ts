@@ -66,9 +66,10 @@ export class User extends Base {
   @Column({ name: 'language_column', default: UserLanguage.VI })
   language: string;
 
-  @Column({ name: 'is_active_column', default: true })
-  @AutoMap()
-  isActive: boolean;
+  // Buoc 3.4: trang thai khoa da roi entity. Khoa/mo nam o `shared-user`
+  // (`UserActiveChecker`, `JwtStrategy`); `UserResponseDto.isActive` gan tu
+  // identity (`user.helper.ts`). Cot cuc bo doi ten `_deprecated_*` boi
+  // migration `v4.0.0-03-1786700000400`, xoa that o giai doan 10.
 
   @Column({ name: 'dob_column', nullable: true })
   @AutoMap()
