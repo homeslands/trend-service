@@ -46,8 +46,8 @@ import { CardOrder } from '../card-order/entities/card-order.entity';
 import { SharedPointTransactionService } from 'src/shared/services/shared-point-transaction.service';
 import { SharedUserRefService } from 'src/shared/services/shared-user-ref.service';
 import {
-  applyNestedUserIsActive,
-  assignNestedUserIsActive,
+  applyNestedUserFlags,
+  assignNestedUserFlags,
   batchLookupSharedUserIdentities,
 } from 'src/user/user.helper';
 import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
@@ -86,7 +86,7 @@ export class PointTransactionService {
     // ngay tai bien gioi. Xem ghi chu trong `create`.
     private readonly sharedUserRefService: SharedUserRefService,
     private readonly sharedExportFileService: SharedExportFileService,
-    // Buoc 3.4 - `user.isActive` lay tu shared-user (applyNestedUserIsActive).
+    // Buoc 3.4 - `user.isActive` lay tu shared-user (applyNestedUserFlags).
     private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {}
 
@@ -408,7 +408,7 @@ export class PointTransactionService {
       PointTransaction,
       PointTransactionResponseDto,
     );
-    assignNestedUserIsActive([[pt.user, response.user]], userIdentityById);
+    assignNestedUserFlags([[pt.user, response.user]], userIdentityById);
     return response;
     // const context = `${PointTransaction.name}.${this.create.name}`;
     // this.logger.log(
@@ -739,7 +739,7 @@ export class PointTransactionService {
       PointTransaction,
       PointTransactionResponseDto,
     );
-    await applyNestedUserIsActive(
+    await applyNestedUserFlags(
       pts.map((pt, index) => [pt.user, cardsResponse[index]?.user] as const),
       this.sharedUserServiceClient,
       this.logger,
@@ -784,7 +784,7 @@ export class PointTransactionService {
       PointTransaction,
       PointTransactionResponseDto,
     );
-    await applyNestedUserIsActive(
+    await applyNestedUserFlags(
       [[pt.user, response.user]],
       this.sharedUserServiceClient,
       this.logger,
