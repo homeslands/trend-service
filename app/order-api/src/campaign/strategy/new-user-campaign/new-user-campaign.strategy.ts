@@ -175,6 +175,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     return recipient;
   }
 
+  // Buoc 5.5: doi dich o 7.4 ⇒ gui kem campaignIdempotencyKey(<slug campaign>, <sharedUserId nguoi nhan>) (`shared/constants/service-ref.constant.ts`).
   private async executeCoinGift(
     campaign: Campaign,
     user: User,

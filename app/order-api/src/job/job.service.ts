@@ -119,6 +119,7 @@ export class JobService {
           const sharedUserId = order.owner?.sharedUserId;
 
           // Calc balance
+          // Buoc 5.5: doi dich o 7.4 ⇒ gui kem orderOpIdempotencyKey(<slug don>, 'debit') (`shared/constants/service-ref.constant.ts`).
           await this.sharedBalanceService.calcBalance({
             sharedUserId,
             points: order.payment.amount,
