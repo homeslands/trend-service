@@ -218,6 +218,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     let closedAfterGrant = false;
     let remainingAtExhaustion = 0;
     let coinPerUserNeeded = 0;
+    let alreadyGranted: CampaignRecipient | null = null;
 
     // 1. Reserve the coins and record the recipient atomically. The template
     // row is locked so concurrent registrations cannot overspend the budget.
@@ -226,6 +227,18 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
         where: { id: campaign.coinCampaignTemplate.id },
         lock: { mode: 'pessimistic_write' },
       });
+
+      // Buoc 5.7 (5.2(b)): mot khach chi nhan thuong khach-moi MOT lan, kiem
+      // NGAY TRONG transaction nay, SAU khoa template o tren: hai luot dong
+      // thoi cho cung mot khach (hai event, hai instance) xep hang o khoa do,
+      // luot sau doc thay hang cua luot truoc. `checkEligibility` cua
+      // `triggerForUser` doc NGOAI transaction nen ca hai luot deu qua, con
+      // UNIQUE (campaign, user, year) khong chan vi `year = null` (MySQL khong
+      // so NULL voi NULL).
+      alreadyGranted = await manager.findOne(CampaignRecipient, {
+        where: { campaign: { id: campaign.id }, user: { id: user.id } },
+      });
+      if (alreadyGranted) return alreadyGranted;
 
       const coinPerUser = Number(template.coinPerUser);
 
@@ -271,6 +284,15 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
       return manager.save(recipientEntity);
     });
 
+    if (alreadyGranted) {
+      // Khong giu ngan sach, khong cong xu, khong thong bao lan hai.
+      this.logger.warn(
+        `[NEW_USER][COIN] User ${user.id} already received campaign ${campaign.slug}, skip (no coins credited)`,
+        context,
+      );
+      return recipient;
+    }
+
     if (budgetExhausted) {
       // Out of coins before this user could be served: stop the campaign and
       // let the admins know; the registering user gets no coins.
@@ -307,17 +329,24 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     // ban ghi `user` da tra san o tren, khong tra lai va khong doc cot slug.
     const sharedUserId = user.sharedUserId;
 
+    // Buoc 5.7 - CHUA XONG PHAN VI: ba lenh duoi day VAN ghi bang cuc bo cua
+    // trend. Doi dich o 7.4(b): cong vao vi o shared-user (kem
+    // campaignIdempotencyKey), bo luot doc-sau-cong, so xu do vi ghi. Dung coi
+    // campaign la "da don xong vi" sau giai doan 5.
+    // 7.4(b): doi dich - lenh cong xu IN.
     await this.sharedBalanceService.calcBalance({
       sharedUserId,
       points: grantedCoin,
       type: PointTransactionTypeEnum.IN,
     });
 
+    // 7.4(b): bo - luot doc-sau-cong (vi tra so du sau khi cong).
     const currentBalance = await this.sharedBalanceService.findOneByField({
       sharedUserId,
       slug: null,
     });
 
+    // 7.4(b): doi dich - so xu `objectType=CAMPAIGN` (vi ghi so).
     await this.sharedPointTransactionService.create({
       type: PointTransactionTypeEnum.IN,
       desc: `Tặng ${grantedCoin.toLocaleString()} xu chào mừng thành viên mới từ chiến dịch ${campaign.name}`,
