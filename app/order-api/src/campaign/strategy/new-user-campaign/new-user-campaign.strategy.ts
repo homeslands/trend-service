@@ -25,7 +25,13 @@ import { CoinCampaignTemplate } from '../../entity/coin-campaign-template.entity
 import { CampaignStatus } from '../../campaign.constants';
 import { CampaignException } from '../../campaign.exception';
 import { CampaignValidation } from '../../campaign.validation';
-import { ICampaignStrategy } from '../campaign.strategy';
+import {
+  CampaignIdentities,
+  ICampaignStrategy,
+  requireCampaignIdentity,
+} from '../campaign.strategy';
+import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { batchLookupSharedUserIdentities } from 'src/user/user.helper';
 import { RoleEnum } from 'src/role/role.enum';
 import { NotificationService } from 'src/notification/notification.service';
 import { NotificationLanguageService } from 'src/notification/language/notification-language.service';
@@ -43,19 +49,43 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     private readonly sharedBalanceService: SharedBalanceService,
     private readonly notificationService: NotificationService,
     private readonly notificationLanguageService: NotificationLanguageService,
+    private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {}
 
-  async execute(campaign: Campaign, user: User): Promise<CampaignRecipient> {
+  async execute(
+    campaign: Campaign,
+    user: User,
+    identities?: CampaignIdentities,
+  ): Promise<CampaignRecipient> {
+    const context = `${NewUserCampaignStrategy.name}.${this.execute.name}`;
+    // Buoc 5.6: ngon ngu thong bao lay tu shared-user, tra TRUOC lenh ghi
+    // (giu ngan sach xu / tao voucher) - khong tra duoc thi bo qua nguoi nay
+    // (xem `requireCampaignIdentity`).
+    const identity = requireCampaignIdentity(
+      identities ??
+        (await batchLookupSharedUserIdentities(
+          [user.sharedUserId],
+          this.sharedUserServiceClient,
+          this.logger,
+          context,
+        )),
+      user,
+      this.logger,
+      context,
+    );
+    const language = identity.language ?? 'vi';
+
     // Reward type is implied by which template the campaign carries.
     if (campaign.coinCampaignTemplate) {
-      return this.executeCoinGift(campaign, user);
+      return this.executeCoinGift(campaign, user, language);
     }
-    return this.executeVoucherGift(campaign, user);
+    return this.executeVoucherGift(campaign, user, language);
   }
 
   private async executeVoucherGift(
     campaign: Campaign,
     user: User,
+    language: string,
   ): Promise<CampaignRecipient> {
     const context = `${NewUserCampaignStrategy.name}.${this.executeVoucherGift.name}`;
 
@@ -152,7 +182,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
           voucherTitle: createdVoucher.title,
           voucherCode: createdVoucher.code,
         },
-        user.language ?? 'vi',
+        language,
       );
       await this.notificationService.create({
         receiverId: user.id,
@@ -179,6 +209,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
   private async executeCoinGift(
     campaign: Campaign,
     user: User,
+    language: string,
   ): Promise<CampaignRecipient> {
     const context = `${NewUserCampaignStrategy.name}.${this.executeCoinGift.name}`;
 
@@ -307,7 +338,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
       const { title, body } = this.notificationLanguageService.format(
         NotificationMessageCode.COIN_NEW_USER_RECEIVED,
         { points: grantedCoin.toLocaleString() },
-        user.language ?? 'vi',
+        language,
       );
       await this.notificationService.create({
         receiverId: user.id,
@@ -347,7 +378,27 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
         where: { role: { name: In([RoleEnum.Admin, RoleEnum.SuperAdmin]) } },
       });
 
+      // Buoc 5.6: MOT luot lookupByIds cho ca nhom admin (khong tra trong vong
+      // lap). Admin khong tra duoc thi bo qua + log, cac admin khac van nhan;
+      // shared-user khong tra loi => nem 503, catch duoi ghi log (best-effort).
+      const identityById = await batchLookupSharedUserIdentities(
+        admins.map((admin) => admin.sharedUserId),
+        this.sharedUserServiceClient,
+        this.logger,
+        context,
+      );
+
       for (const admin of admins) {
+        const identity = admin.sharedUserId
+          ? identityById.get(admin.sharedUserId)
+          : undefined;
+        if (!identity) {
+          this.logger.warn(
+            `[NEW_USER][COIN] Admin ${admin.id} has no shared-user identity (sharedUserId=${admin.sharedUserId ?? 'null'}), skip budget alert`,
+            context,
+          );
+          continue;
+        }
         const { title, body } = this.notificationLanguageService.format(
           NotificationMessageCode.COIN_CAMPAIGN_BUDGET_EXHAUSTED,
           {
@@ -355,7 +406,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
             remainingCoin: remainingCoin.toLocaleString(),
             coinPerUser: coinPerUser.toLocaleString(),
           },
-          admin.language ?? 'vi',
+          identity.language ?? 'vi',
         );
         await this.notificationService.create({
           receiverId: admin.id,
