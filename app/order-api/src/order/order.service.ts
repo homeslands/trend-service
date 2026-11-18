@@ -84,6 +84,8 @@ import {
   isDefaultCustomer,
 } from 'src/user/user.constant';
 import { orderRef } from 'src/shared/constants/service-ref.constant';
+import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { mergeOrderOwnerIdentity } from './order-owner-identity';
 @Injectable()
 export class OrderService {
   constructor(
@@ -115,6 +117,7 @@ export class OrderService {
     private readonly featureFlagSystemService: FeatureFlagSystemService,
     private readonly notificationUtils: NotificationUtils,
     private readonly printerProducer: PrinterProducer,
+    private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {}
 
   async getMaxDistanceDelivery(branchSlug: string): Promise<number> {
@@ -460,7 +463,15 @@ export class OrderService {
       },
     );
 
-    return this.mapper.map(updatedOrder, Order, OrderResponseDto);
+    const orderDto = this.mapper.map(updatedOrder, Order, OrderResponseDto);
+    await mergeOrderOwnerIdentity(
+      [updatedOrder],
+      [orderDto],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    return orderDto;
   }
 
   async updateVoucherOrder(
@@ -678,7 +689,15 @@ export class OrderService {
       },
     );
 
-    return this.mapper.map(updatedOrder, Order, OrderResponseDto);
+    const orderDto = this.mapper.map(updatedOrder, Order, OrderResponseDto);
+    await mergeOrderOwnerIdentity(
+      [updatedOrder],
+      [orderDto],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    return orderDto;
   }
 
   async updateVoucherOrderPublic(
@@ -893,7 +912,15 @@ export class OrderService {
       },
     );
 
-    return this.mapper.map(updatedOrder, Order, OrderResponseDto);
+    const orderDto = this.mapper.map(updatedOrder, Order, OrderResponseDto);
+    await mergeOrderOwnerIdentity(
+      [updatedOrder],
+      [orderDto],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    return orderDto;
   }
 
   /**
@@ -1037,7 +1064,15 @@ export class OrderService {
       },
     );
 
-    return this.mapper.map(createdOrder, Order, OrderResponseDto);
+    const orderDto = this.mapper.map(createdOrder, Order, OrderResponseDto);
+    await mergeOrderOwnerIdentity(
+      [createdOrder],
+      [orderDto],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    return orderDto;
   }
 
   /**
@@ -1175,7 +1210,15 @@ export class OrderService {
       },
     );
 
-    return this.mapper.map(createdOrder, Order, OrderResponseDto);
+    const orderDto = this.mapper.map(createdOrder, Order, OrderResponseDto);
+    await mergeOrderOwnerIdentity(
+      [createdOrder],
+      [orderDto],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    return orderDto;
   }
 
   /**
@@ -1559,6 +1602,7 @@ export class OrderService {
   async getAllOrders(
     options: GetOrderRequestDto,
   ): Promise<AppPaginatedResponseDto<OrderResponseDto>> {
+    const context = `${OrderService.name}.${this.getAllOrders.name}`;
     const findOptionsWhere: FindOptionsWhere<Order> = {
       branch: {
         slug: options.branch,
@@ -1657,7 +1701,13 @@ export class OrderService {
     //   mapFrom((source: any) => source.printerInvoices),
     // )
     // squeeze type any
-    const ordersDto = this.mapper.mapArray(orders, Order, OrderResponseDto);
+    const ordersDto = await mergeOrderOwnerIdentity(
+      orders,
+      this.mapper.mapArray(orders, Order, OrderResponseDto),
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
     const page = options.hasPaging ? options.page : 1;
     const pageSize = options.hasPaging ? options.size : total;
 
@@ -1721,6 +1771,7 @@ export class OrderService {
   }
 
   async getAllOrdersBySlugArray(data: string[]): Promise<OrderResponseDto[]> {
+    const context = `${OrderService.name}.${this.getAllOrdersBySlugArray.name}`;
     const orders = await this.orderRepository.find({
       where: { slug: In(data) },
       relations: [
@@ -1738,7 +1789,13 @@ export class OrderService {
       ],
       order: { createdAt: 'DESC' },
     });
-    return this.mapper.mapArray(orders, Order, OrderResponseDto);
+    return mergeOrderOwnerIdentity(
+      orders,
+      this.mapper.mapArray(orders, Order, OrderResponseDto),
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
   }
 
   /**
@@ -1748,6 +1805,7 @@ export class OrderService {
    * @throws {OrderException} If order is not found
    */
   async getOrderBySlug(slug: string): Promise<OrderResponseDto> {
+    const context = `${OrderService.name}.${this.getOrderBySlug.name}`;
     // const order = await this.orderUtils.getOrder({ where: { slug } });
     const order = await this.orderRepository.findOne({
       where: { slug },
@@ -1772,6 +1830,13 @@ export class OrderService {
       },
     });
     const orderDto = this.mapper.map(order, Order, OrderResponseDto);
+    await mergeOrderOwnerIdentity(
+      [order],
+      [orderDto],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
     // const orderItems = this.getOrderItemsStatuses(orderDto);
     // orderDto.orderItems = orderItems;
     return orderDto;
