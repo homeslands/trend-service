@@ -40,8 +40,20 @@ export class OrderScheduler {
       );
     }
 
-    const job = setTimeout(async () => {
-      await this.orderUtils.deleteOrder(orderSlug);
+    // Buoc 7.7c (nghiem thu GD7): `deleteOrder` goi shared-user QUA MANG
+    // (hoan khoa debit cua don tra xu). try/catch PHAI nam BEN TRONG
+    // callback: callback chay sau `delay`, khi ham bao ngoai da tra ve tu
+    // lau, nen mot `await` nem loi o day la `unhandledRejection` va Node
+    // **thoat ca tien trinh**. Khuon `terminal` (`order.scheduler.ts`) va
+    // `card-order.subscriber.ts`.
+    const job = setTimeout(() => {
+      this.orderUtils.deleteOrder(orderSlug).catch((error) => {
+        this.logger.error(
+          `Error when deleting order ${orderSlug}: ${error?.message}`,
+          error?.stack,
+          context,
+        );
+      });
     }, delay);
 
     this.schedulerRegistry.addTimeout(jobName, job);
