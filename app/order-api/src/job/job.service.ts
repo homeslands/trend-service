@@ -26,7 +26,10 @@ import { CreatePointTransactionPayload } from 'src/shared/interfaces/commons/sha
 import { InvoiceAction } from 'src/invoice/invoice.constants';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { AccumulatedPointService } from 'src/accumulated-point/accumulated-point.service';
-import { orderRef } from 'src/shared/constants/service-ref.constant';
+import {
+  orderOpIdempotencyKey,
+  orderRef,
+} from 'src/shared/constants/service-ref.constant';
 
 @Injectable()
 export class JobService {
@@ -70,6 +73,58 @@ export class JobService {
         order.status === OrderStatus.PENDING &&
         order.referenceNumber === null
       ) {
+        // Buoc 7.5 (QD6, QD7 - trend-api.md 7.3): TRU XU + XAC NHAN DIEM
+        // TRUOC, CHOT DON SAU. Hai lenh duoi hong => nem ra `catch` ngoai cung
+        // => don con PENDING, `referenceNumber` con null, job con PENDING =>
+        // `job.recovery` chay lai ca ham o lan khoi dong sau (guard tren van
+        // dung). Truoc 7.5 don da chot + commit roi moi tru: chet giua chung
+        // la guard sai => xu KHONG BAO GIO bi tru (loi co tu mono,
+        // `issuses/coin-deduct-after-order-paid.md`).
+        // Con ho: tru xong ma lenh chot hong (BE-22) thi lan chay lai tru lan
+        // hai - 7.7 dong lai bang khoa idempotent `trend:<orderSlug>:debit`.
+        // Handle calc balance when use point payment method
+        if (order.payment?.paymentMethod === PaymentMethod.POINT) {
+          // MOT nguon khoa cho ca ba lenh duoi (buoc 2.12/2.13 — 2C). Doc
+          // `sharedUserId`, KHONG phai `slug`: doi ten khoa ma giu nguyen gia
+          // tri la "SOT 1" cua dot ra 12/09/2026, TypeScript khong bat duoc.
+          const sharedUserId = order.owner?.sharedUserId;
+
+          // Calc balance
+          // Buoc 5.5: doi dich o 7.4 ⇒ gui kem orderOpIdempotencyKey(<slug don>, 'debit') (`shared/constants/service-ref.constant.ts`).
+          await this.sharedBalanceService.calcBalance({
+            sharedUserId,
+            points: order.payment.amount,
+            type: 'out',
+          });
+
+          const currentBalance = await this.sharedBalanceService.findOneByField(
+            { sharedUserId, slug: null },
+          );
+
+          // Create point transaction
+          await this.sharedPointTransactionService.create({
+            type: PointTransactionTypeEnum.OUT,
+            desc: `Sử dụng ${CurrencyUtil.formatCurrency(order.subtotal)} xu thanh toán đơn hàng`,
+            objectType: PointTransactionObjectTypeEnum.ORDER,
+            objectSlug: order.slug,
+            points: order.payment?.amount,
+            sharedUserId,
+            balance: currentBalance.points,
+          } satisfies CreatePointTransactionPayload);
+        }
+
+        // confirm use accumulated points - QD7: KHONG bat loi. Hong ma van chot
+        // thi khach da duoc giam bang diem, diem chua bi tru, va dong giu cho
+        // nam lai chan lan dat don sau cua chinh khach do.
+        // Buoc 2.15 — 2C: tham chieu `trend:<orderSlug>`, khong phai id cuc bo.
+        await this.accumulatedPointService.confirmPointsUsage(
+          orderRef(order.slug),
+        );
+        this.logger.log(
+          `Confirmed points usage for order ${order.slug}`,
+          context,
+        );
+
         const lastOrderWithNumber = await this.orderRepository.findOne({
           where: {
             branch: { id: order.branch.id },
@@ -111,55 +166,6 @@ export class JobService {
           },
         );
 
-        // Handle calc balance when use point payment method
-        if (order.payment?.paymentMethod === PaymentMethod.POINT) {
-          // MOT nguon khoa cho ca ba lenh duoi (buoc 2.12/2.13 — 2C). Doc
-          // `sharedUserId`, KHONG phai `slug`: doi ten khoa ma giu nguyen gia
-          // tri la "SOT 1" cua dot ra 12/09/2026, TypeScript khong bat duoc.
-          const sharedUserId = order.owner?.sharedUserId;
-
-          // Calc balance
-          // Buoc 5.5: doi dich o 7.4 ⇒ gui kem orderOpIdempotencyKey(<slug don>, 'debit') (`shared/constants/service-ref.constant.ts`).
-          await this.sharedBalanceService.calcBalance({
-            sharedUserId,
-            points: order.payment.amount,
-            type: 'out',
-          });
-
-          const currentBalance = await this.sharedBalanceService.findOneByField(
-            { sharedUserId, slug: null },
-          );
-
-          // Create point transaction
-          await this.sharedPointTransactionService.create({
-            type: PointTransactionTypeEnum.OUT,
-            desc: `Sử dụng ${CurrencyUtil.formatCurrency(order.subtotal)} xu thanh toán đơn hàng`,
-            objectType: PointTransactionObjectTypeEnum.ORDER,
-            objectSlug: order.slug,
-            points: order.payment?.amount,
-            sharedUserId,
-            balance: currentBalance.points,
-          } satisfies CreatePointTransactionPayload);
-        }
-
-        // confirm use accumulated points
-        try {
-          // Buoc 2.15 — 2C: tham chieu `trend:<orderSlug>`, khong phai id cuc bo.
-          await this.accumulatedPointService.confirmPointsUsage(
-            orderRef(order.slug),
-          );
-          this.logger.log(
-            `Confirmed points usage for order ${order.slug}`,
-            context,
-          );
-        } catch (error) {
-          this.logger.error(
-            `Error when confirming points usage for order ${order.slug}: ${error.message}`,
-            error.stack,
-            context,
-          );
-        }
-
         // add accumulated points
         try {
           // Buoc 2.14 — 2C: khoa la `sharedUserId`, KHONG phai id cuc bo.
@@ -182,8 +188,11 @@ export class JobService {
             context,
           );
         } catch (error) {
+          // QD8: cong diem hong VAN cho chot don (don da PAID o tren), chi log.
+          // Log phai tra duoc de doi soat Z-8 goi lai: slug don + sharedUserId +
+          // khoa idempotent cua lenh `add`.
           this.logger.error(
-            `Error when adding accumulated points for order ${order.slug}: ${error.message}`,
+            `Error when adding accumulated points for order ${order.slug} (sharedUserId ${order.owner?.sharedUserId}, key ${orderOpIdempotencyKey(order.slug, 'add')}): ${error.message}`,
             error.stack,
             context,
           );
@@ -223,7 +232,7 @@ export class JobService {
       }
     } catch (error) {
       this.logger.error(
-        `Error when create chef orders from order ${orderSlug}: ${error.message}`,
+        `Order ${orderSlug}: payment-paid job stopped: ${error.message}. If the coin debit or the points confirmation failed, the order stays PENDING (not finalized) and the job stays PENDING - job.recovery retries it on the next start (QD6/QD7)`,
         error.stack,
         context,
       );
