@@ -1693,29 +1693,53 @@ export class UserService {
 
     if (query.paymentMethod) params.push(query.paymentMethod);
 
-    if (query.phonenumber) params.push(`%${query.phonenumber}%`);
+    // QD4 (buoc 7.2) - o tim SDT loc TRUOC o shared-user: khop chuoi con ben
+    // do, nhan mang id, roi `u.shared_user_id_column IN (...)` (cung vi tri
+    // `?` cuoi cung cua ban `LIKE` cu). Khong nhap SDT thi KHONG goi.
+    // Vuot tran 500 => 400 ma 137007 "tim hep lai" (khong cat bot);
+    // shared-user khong tra loi => 503 (fail-closed - day la bo loc chinh
+    // cua response, roi ve cot cuc bo la sai lech D9).
+    // Cau SQL nay KHONG co LIMIT/OFFSET (tra het khach cua chi nhanh roi
+    // `reduce` o duoi), nen loc truoc khong lam meo phan trang nao.
+    const phonenumberFragment = query.phonenumber?.trim();
+    const matchedSharedUserIds = phonenumberFragment
+      ? await this.sharedUserServiceClient.searchIdsByPhonenumber(
+          phonenumberFragment,
+        )
+      : [];
+    params.push(...matchedSharedUserIds);
 
     const clauseOptions = {
       hasStartDate,
       hasEndDate,
       onlyNewCustomers,
       hasPaymentMethod: !!query.paymentMethod,
-      hasPhonenumber: !!query.phonenumber,
+      sharedUserIdCount: matchedSharedUserIds.length,
     };
 
+    // Co nhap SDT ma shared-user khong khop ai => khong co khach nao: bo
+    // qua truy van (`IN ()` rong la loi cu phap), di tiep voi mang rong de
+    // response giu nguyen shape.
+    const noPhonenumberMatch =
+      !!phonenumberFragment && matchedSharedUserIds.length === 0;
     const [results, statisticResults]: [
       AccountRevenueQueryResponseDto[],
       AccountRevenueStatisticQueryResponseDto[],
-    ] = await Promise.all([
-      this.userRepository.query(getAccountRevenueClause(clauseOptions), params),
-      this.userRepository.query(
-        getAccountRevenueStatisticClause({
-          ...clauseOptions,
-          groupBy: query.groupBy ?? UserStatisticsGroupBy.DAY,
-        }),
-        params,
-      ),
-    ]);
+    ] = noPhonenumberMatch
+      ? [[], []]
+      : await Promise.all([
+          this.userRepository.query(
+            getAccountRevenueClause(clauseOptions),
+            params,
+          ),
+          this.userRepository.query(
+            getAccountRevenueStatisticClause({
+              ...clauseOptions,
+              groupBy: query.groupBy ?? UserStatisticsGroupBy.DAY,
+            }),
+            params,
+          ),
+        ]);
 
     // Ghep ten khach hang moi nhat tu shared-user - customerName tu raw SQL
     // la ban cuc bo co the cu (architect-http.md muc 1.1 quy tac 4, cung
