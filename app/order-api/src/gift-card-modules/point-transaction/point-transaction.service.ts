@@ -1,39 +1,27 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { PointTransaction } from './entities/point-transaction.entity';
-import {
-  Between,
-  FindOptionsWhere,
-  IsNull,
-  Like,
-  MoreThan,
-  Raw,
-  Repository,
-} from 'typeorm';
+import { Repository } from 'typeorm';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 import { InjectMapper } from '@automapper/nestjs';
 import { Mapper } from '@automapper/core';
 import {
   AnalysisPointTransactionResponseDto,
-  AnalysisPointTransactionStatisticItemDto,
   PointTransactionResponseDto,
   PointTransactionStatisticItemDto,
 } from './dto/point-transaction-response.dto';
-import { createSortOptions } from 'src/shared/utils/obj.util';
 import { AppPaginatedResponseDto } from 'src/app/app.dto';
 import { PointTransactionException } from './point-transaction.exception';
 import { PointTransactionValidation } from './point-transaction.validation';
 import { FindAllPointTransactionDto } from './dto/find-all-point-transaction.dto';
 import { CreatePointTransactionDto } from './dto/create-point-transaction.dto';
 import {
-  PointTransactionGroupBy,
   PointTransactionObjectTypeEnum,
   PointTransactionTypeEnum,
 } from './entities/point-transaction.enum';
 import { Order } from 'src/order/order.entity';
 import { GiftCard } from '../gift-card/entities/gift-card.entity';
-import { User } from 'src/user/user.entity';
 import { PdfService } from 'src/pdf/pdf.service';
 import { fileToBase64DataUri } from 'src/shared/utils/file.util';
 import {
@@ -46,7 +34,6 @@ import { CardOrder } from '../card-order/entities/card-order.entity';
 import { SharedPointTransactionService } from 'src/shared/services/shared-point-transaction.service';
 import { SharedUserRefService } from 'src/shared/services/shared-user-ref.service';
 import {
-  applyNestedUserFlags,
   assignNestedUserFlags,
   batchLookupSharedUserIdentities,
 } from 'src/user/user.helper';
@@ -61,19 +48,36 @@ import { ExportFilename } from 'src/shared/constants/export-filename.constant';
 import { CurrencyUtil } from 'src/shared/utils/currency.util';
 import { Campaign } from 'src/campaign/entity/campaign.entity';
 
+// Buoc 7.7d (QD17): mot dong giao dich xu cua nhom "xem ho" tra ve tu
+// `/internal/point-transactions/*` o shared-user - field cu cua
+// `PointTransactionResponseDto` + `service` (service da ghi dong, QD-T5) +
+// `balance` (so du sau giao dich, chi dong cua `/export` co).
+type PointTransactionViewRow = PointTransactionResponseDto & {
+  service?: string | null;
+  balance?: number;
+};
+
+interface PointTransactionViewRows {
+  items: PointTransactionViewRow[];
+  total: number;
+}
+
+// Ngay cua bo loc gui sang shared-user: chuoi `YYYY-MM-DD`. DTO cua route da
+// doi chuoi do sang `Date` theo gio may (`startOf/endOf('day')`); gui `Date`
+// di thi no thanh chuoi ISO UTC, shared-user parse lai bang
+// `moment(value, 'YYYY-MM-DD')` => lech mot ngay o mui gio duong.
+const toWireDate = (date?: Date): string | undefined =>
+  date ? moment(date).format('YYYY-MM-DD') : undefined;
+
 @Injectable()
 export class PointTransactionService {
   constructor(
-    @InjectRepository(PointTransaction)
-    private ptRepository: Repository<PointTransaction>,
     @InjectRepository(CardOrder)
     private coRepository: Repository<CardOrder>,
     @InjectRepository(Order)
     private orderRepository: Repository<Order>,
     @InjectRepository(GiftCard)
     private gcRepository: Repository<GiftCard>,
-    @InjectRepository(User)
-    private userRepository: Repository<User>,
     @InjectRepository(Campaign)
     private campaignRepository: Repository<Campaign>,
     @Inject(WINSTON_MODULE_NEST_PROVIDER)
@@ -86,47 +90,68 @@ export class PointTransactionService {
     // ngay tai bien gioi. Xem ghi chu trong `create`.
     private readonly sharedUserRefService: SharedUserRefService,
     private readonly sharedExportFileService: SharedExportFileService,
-    // Buoc 3.4 - `user.isActive` lay tu shared-user (applyNestedUserFlags).
+    // Buoc 3.4 - `user.isActive` lay tu shared-user; buoc 7.7d - nhom "xem
+    // ho" doc giao dich xu o shared-user (`/internal/point-transactions/*`).
     private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {}
 
+  // Buoc 7.7d (QD17): tong nhan / tieu + chuoi thoi gian cua giao dich xu,
+  // doc `/internal/point-transactions/analysis` (route da gac role).
   async analyze(req: FindAllPointTransactionDto) {
-    const { sort } = req;
-
-    const whereOpts: FindOptionsWhere<PointTransaction> =
-      this.buildWhereOptions(req);
-
-    const sortOpts = createSortOptions<PointTransaction>(sort);
-
-    const [pts, statistics] = await Promise.all([
-      this.ptRepository.find({
-        where: whereOpts,
-        order: sortOpts,
-        relations: ['user'],
-        select: ['points', 'type'],
-      }),
-      this.getAnalysisStatistics(req),
-    ]);
-
-    const totalEarned = pts
-      .filter((item) => item.type === PointTransactionTypeEnum.IN)
-      .reduce((prev, curr) => prev + curr?.points, 0);
-    const totalSpent = pts
-      .filter((item) => item.type === PointTransactionTypeEnum.OUT)
-      .reduce((prev, curr) => prev + curr?.points, 0);
-    const netDifference = Math.abs(totalEarned - totalSpent);
-
-    const result = new AnalysisPointTransactionResponseDto();
-
-    Object.assign(result, {
-      totalEarned,
-      totalSpent,
-      netDifference,
-      statistics,
-    });
-    return result;
+    return await this.sharedUserServiceClient.analyzePointTransactions<AnalysisPointTransactionResponseDto>(
+      await this.toViewFilter(req),
+    );
   }
 
+  // Bo loc cua `/internal/point-transactions/query|analysis` tu query cu cua
+  // man hinh. `userSlug` (slug cuc bo) => `sharedUserId` ngay tai bien (slug
+  // sai => 400/137000); khong co `userSlug` => moi giao dich do CHINH service
+  // nay ghi (QD-T5). `k` (ten / SDT) shared-user tu khop tren bang user cua no
+  // va trai bo loc nguoi vao ca hai nhanh - het BE-17, het doc cot ten cuc bo.
+  private async toViewFilter(req: FindAllPointTransactionDto) {
+    return {
+      userId: req.userSlug
+        ? await this.sharedUserRefService.toSharedUserId(req.userSlug)
+        : undefined,
+      type: req.type || undefined,
+      startDate: toWireDate(req.startDate),
+      endDate: toWireDate(req.endDate),
+      k: req.k || undefined,
+      groupBy: req.groupBy,
+      page: req.page,
+      size: req.size,
+      sort: req.sort,
+    };
+  }
+
+  // Mot giao dich theo slug, chi trong cac giao dich do CHINH service nay ghi
+  // (khong gui `userId` => pham vi service, QD-T5): tham chieu mem cua dong
+  // (`objectSlug`) chi tra duoc o service da ghi no. Slug rong KHONG duoc gui
+  // di - thieu `slug` thi shared-user tra MOI dong cua service, dong dau la
+  // giao dich cua mot nguoi la.
+  private async findViewRowBySlug(
+    slug: string,
+  ): Promise<PointTransactionViewRow> {
+    if (!slug) {
+      throw new PointTransactionException(
+        PointTransactionValidation.POINT_TRANSACTION_NOT_FOUND,
+      );
+    }
+    const { items } =
+      await this.sharedUserServiceClient.exportPointTransactions<PointTransactionViewRows>(
+        { slug },
+      );
+    if (!items?.length) {
+      throw new PointTransactionException(
+        PointTransactionValidation.POINT_TRANSACTION_NOT_FOUND,
+      );
+    }
+    return items[0];
+  }
+
+  // Buoc 7.7d (QD17): file Excel giao dich xu toan he thong = moi giao dich do
+  // service nay ghi (QD-T5), lay o shared-user (cu nhat truoc; qua tran so dong
+  // => 400 kem cau "thu hep bo loc" cua shared-user, khong cat bot).
   async exportAllSystem(query: ExportAllSystemPointTransactionDto) {
     const context = `${PointTransactionService.name}.${this.export.name}`;
     this.logger.log(
@@ -134,27 +159,14 @@ export class PointTransactionService {
       context,
     );
 
-    const whereOpts: FindOptionsWhere<PointTransaction> = {};
-
-    if (query.type) {
-      whereOpts.type = query.type;
-    }
-
-    if (query.fromDate && !query.toDate) {
-      whereOpts.createdAt = MoreThan(query.fromDate);
-    }
-
-    if (query.fromDate && query.toDate) {
-      whereOpts.createdAt = Between(query.fromDate, query.toDate);
-    }
-
-    const pts = await this.ptRepository.find({
-      where: whereOpts,
-      relations: ['user'],
-      order: {
-        createdAt: 'ASC',
-      },
-    });
+    const { items: pts } =
+      await this.sharedUserServiceClient.exportPointTransactions<PointTransactionViewRows>(
+        {
+          type: query.type || undefined,
+          fromDate: toWireDate(query.fromDate),
+          toDate: toWireDate(query.toDate),
+        },
+      );
 
     const filename = ExportFilename.EXPORT_ALL_SYSTEM_POINT_TRANSACTION;
     const excelConfig = this.buildExcelConfig();
@@ -213,6 +225,11 @@ export class PointTransactionService {
     return exportData;
   }
 
+  // Buoc 7.7d (QD17): file PDF lich su xu cua MOT khach. Dong giao dich lay o
+  // shared-user (`/internal/point-transactions/export` co `userId`: moi dong
+  // cua vi nguoi do, ke ca dong service khac ghi - mot vi moi nguoi, QD-T5).
+  // Ten / dia chi / SDT o dau file lay tu identity shared-user, khong doc cot
+  // identity cuc bo (drop o giai doan 8).
   async exportAll(query: ExportAllPointTransactionDto) {
     const context = `${PointTransactionService.name}.${this.export.name}`;
     this.logger.log(
@@ -220,42 +237,21 @@ export class PointTransactionService {
       context,
     );
 
-    const user = await this.userRepository.findOne({
-      where: {
-        slug: query.userSlug,
-      },
-    });
+    const sharedUserId = await this.sharedUserRefService.toSharedUserId(
+      query.userSlug,
+    );
+    const user = await this.sharedUserServiceClient.lookupById(sharedUserId);
     if (!user) throw new AuthException(AuthValidation.USER_NOT_FOUND);
 
-    const { userSlug } = query;
-
-    const whereOpts: FindOptionsWhere<PointTransaction> = {};
-
-    if (userSlug) {
-      whereOpts.user = {
-        slug: userSlug,
-      };
-    }
-
-    if (query.type) {
-      whereOpts.type = query.type;
-    }
-
-    if (query.fromDate && !query.toDate) {
-      whereOpts.createdAt = MoreThan(query.fromDate);
-    }
-
-    if (query.fromDate && query.toDate) {
-      whereOpts.createdAt = Between(query.fromDate, query.toDate);
-    }
-
-    const pts = await this.ptRepository.find({
-      where: whereOpts,
-      relations: ['user'],
-      order: {
-        createdAt: 'ASC',
-      },
-    });
+    const { items: pts } =
+      await this.sharedUserServiceClient.exportPointTransactions<PointTransactionViewRows>(
+        {
+          userId: sharedUserId,
+          type: query.type || undefined,
+          fromDate: toWireDate(query.fromDate),
+          toDate: toWireDate(query.toDate),
+        },
+      );
 
     const totalIn = pts
       .filter((item) => item.type === PointTransactionTypeEnum.IN)
@@ -293,20 +289,14 @@ export class PointTransactionService {
     );
   }
 
+  // Bien nhan MOT giao dich: dong lay o shared-user theo slug (trong pham vi
+  // giao dich service nay ghi), doi tuong tham chieu (`ref`) van tra o DB cua
+  // service nay - chi no biet don / the / campaign cua minh.
   async export(slug: string) {
     const context = `${PointTransactionService.name}.${this.export.name}`;
     this.logger.log(`Export point transaction req: ${slug}`, context);
 
-    const pt = await this.ptRepository.findOne({
-      where: {
-        slug,
-      },
-      relations: ['user'],
-    });
-    if (!pt)
-      throw new PointTransactionException(
-        PointTransactionValidation.POINT_TRANSACTION_NOT_FOUND,
-      );
+    const pt = await this.findViewRowBySlug(slug);
 
     const ref: Order | GiftCard | CardOrder | Campaign =
       await this.getObjectRef({
@@ -518,198 +508,10 @@ export class PointTransactionService {
     // return this.mapper.map(pt, PointTransaction, PointTransactionResponseDto);
   }
 
-  private buildWhereOptions(
-    req: FindAllPointTransactionDto,
-  ): FindOptionsWhere<PointTransaction> {
-    const { userSlug } = req;
-
-    const whereOpts: FindOptionsWhere<PointTransaction> = {};
-
-    let userWhere: FindOptionsWhere<User> | FindOptionsWhere<User>[] = {};
-
-    if (userSlug) {
-      whereOpts.user = {
-        slug: userSlug,
-      };
-    }
-
-    if (req.type) {
-      whereOpts.type = req.type;
-    }
-
-    if (req.startDate && !req.endDate) {
-      whereOpts.createdAt = MoreThan(req.startDate);
-    }
-
-    if (req.startDate && req.endDate) {
-      whereOpts.createdAt = Between(req.startDate, req.endDate);
-    }
-
-    if (req.k) {
-      userWhere = [
-        {
-          ...userWhere,
-          phonenumber: Like(`%${req.k}%`),
-        },
-        {
-          ...userWhere,
-          firstName: Raw(
-            (alias) =>
-              `LOWER(CONCAT(${alias}, ' ', last_name_column)) LIKE LOWER(:q)`,
-            { q: `%${req.k}%` },
-          ),
-        },
-      ];
-    }
-
-    if (!_.isEmpty(userWhere)) {
-      whereOpts.user = userWhere;
-    }
-
-    return whereOpts;
-  }
-
-  // Bucket start of the transaction created time, formatted like /user/statistics
-  private buildGroupByExpr(groupBy: string): string {
-    const col = 'pt.created_at_column';
-    switch (groupBy) {
-      case PointTransactionGroupBy.HOUR:
-        return `DATE_FORMAT(${col}, '%Y-%m-%dT%H:00:00')`;
-      case PointTransactionGroupBy.WEEK:
-        return `DATE_FORMAT(DATE_SUB(${col}, INTERVAL WEEKDAY(${col}) DAY), '%Y-%m-%dT00:00:00')`;
-      case PointTransactionGroupBy.MONTH:
-        return `DATE_FORMAT(${col}, '%Y-%m-01T00:00:00')`;
-      case PointTransactionGroupBy.YEAR:
-        return `DATE_FORMAT(${col}, '%Y-01-01T00:00:00')`;
-      default:
-        return `DATE_FORMAT(${col}, '%Y-%m-%dT00:00:00')`;
-    }
-  }
-
-  // Transaction counts bucketed by time type, using the same filters as findAll
-  private async getStatistics(
-    req: FindAllPointTransactionDto,
-  ): Promise<PointTransactionStatisticItemDto[]> {
-    const groupByExpr = this.buildGroupByExpr(req.groupBy);
-
-    const qb = this.ptRepository
-      .createQueryBuilder('pt')
-      .leftJoin('pt.user', 'user')
-      .select(groupByExpr, 'time')
-      .addSelect('pt.type_column', 'type')
-      .addSelect('COUNT(pt.id_column)', 'count')
-      .groupBy(groupByExpr)
-      .addGroupBy('pt.type_column')
-      .orderBy(groupByExpr, 'ASC');
-
-    if (req.userSlug) {
-      qb.andWhere('user.slug_column = :userSlug', { userSlug: req.userSlug });
-    }
-
-    if (req.type) {
-      qb.andWhere('pt.type_column = :type', { type: req.type });
-    }
-
-    if (req.startDate && !req.endDate) {
-      qb.andWhere('pt.created_at_column > :fromDate', {
-        fromDate: req.startDate,
-      });
-    }
-
-    if (req.startDate && req.endDate) {
-      qb.andWhere('pt.created_at_column BETWEEN :fromDate AND :toDate', {
-        fromDate: req.startDate,
-        toDate: req.endDate,
-      });
-    }
-
-    if (req.k) {
-      qb.andWhere(
-        `(user.phonenumber_column LIKE :k OR LOWER(CONCAT(user.first_name_column, ' ', user.last_name_column)) LIKE LOWER(:k))`,
-        { k: `%${req.k}%` },
-      );
-    }
-
-    const rows = await qb.getRawMany<{
-      time: string;
-      type: string;
-      count: string;
-    }>();
-    return rows.map((row) => ({
-      time: String(row.time),
-      type: String(row.type),
-      count: Number(row.count),
-    }));
-  }
-
-  // Points earned/spent and transaction counts bucketed by time, for the analysis endpoint
-  private async getAnalysisStatistics(
-    req: FindAllPointTransactionDto,
-  ): Promise<AnalysisPointTransactionStatisticItemDto[]> {
-    const groupByExpr = this.buildGroupByExpr(req.groupBy);
-
-    const qb = this.ptRepository
-      .createQueryBuilder('pt')
-      .leftJoin('pt.user', 'user')
-      .select(groupByExpr, 'time')
-      .addSelect('COUNT(pt.id_column)', 'count')
-      .addSelect(
-        `SUM(CASE WHEN pt.type_column = :inType THEN pt.points_column ELSE 0 END)`,
-        'earn',
-      )
-      .addSelect(
-        `SUM(CASE WHEN pt.type_column = :outType THEN pt.points_column ELSE 0 END)`,
-        'spend',
-      )
-      .setParameters({
-        inType: PointTransactionTypeEnum.IN,
-        outType: PointTransactionTypeEnum.OUT,
-      })
-      .groupBy(groupByExpr)
-      .orderBy(groupByExpr, 'ASC');
-
-    if (req.userSlug) {
-      qb.andWhere('user.slug_column = :userSlug', { userSlug: req.userSlug });
-    }
-
-    if (req.type) {
-      qb.andWhere('pt.type_column = :type', { type: req.type });
-    }
-
-    if (req.startDate && !req.endDate) {
-      qb.andWhere('pt.created_at_column > :fromDate', {
-        fromDate: req.startDate,
-      });
-    }
-
-    if (req.startDate && req.endDate) {
-      qb.andWhere('pt.created_at_column BETWEEN :fromDate AND :toDate', {
-        fromDate: req.startDate,
-        toDate: req.endDate,
-      });
-    }
-
-    if (req.k) {
-      qb.andWhere(
-        `(user.phonenumber_column LIKE :k OR LOWER(CONCAT(user.first_name_column, ' ', user.last_name_column)) LIKE LOWER(:k))`,
-        { k: `%${req.k}%` },
-      );
-    }
-
-    const rows = await qb.getRawMany<{
-      time: string;
-      count: string;
-      earn: string;
-      spend: string;
-    }>();
-    return rows.map((row) => ({
-      time: String(row.time),
-      count: Number(row.count),
-      earn: Number(row.earn),
-      spend: Number(row.spend),
-    }));
-  }
-
+  // Buoc 7.7d (QD17): danh sach giao dich xu "xem ho" (mot khach khi co
+  // `userSlug`, khong thi toan bo giao dich cua service nay), doc
+  // `/internal/point-transactions/query`. Dong mang them `service` (QD-T5);
+  // `user` la identity cua shared-user (co san `isActive`).
   async findAll(req: FindAllPointTransactionDto) {
     const context = `${PointTransactionService.name}.${this.findAll.name}`;
     this.logger.log(
@@ -717,79 +519,18 @@ export class PointTransactionService {
       context,
     );
 
-    const { page, size, sort } = req;
-
-    const whereOpts: FindOptionsWhere<PointTransaction> =
-      this.buildWhereOptions(req);
-
-    const sortOpts = createSortOptions<PointTransaction>(sort);
-
-    const [[pts, total], statistics] = await Promise.all([
-      this.ptRepository.findAndCount({
-        where: whereOpts,
-        order: sortOpts,
-        take: size,
-        skip: (page - 1) * size,
-        relations: ['user'],
-      }),
-      this.getStatistics(req),
-    ]);
-    const cardsResponse = this.mapper.mapArray(
-      pts,
-      PointTransaction,
-      PointTransactionResponseDto,
-    );
-    await applyNestedUserFlags(
-      pts.map((pt, index) => [pt.user, cardsResponse[index]?.user] as const),
-      this.sharedUserServiceClient,
-      this.logger,
-      context,
-    );
-    // Calculate total pages
-    const totalPages = Math.ceil(total / size);
-    // Determine hasNext and hasPrevious
-    const hasNext = page < totalPages;
-    const hasPrevious = page > 1;
-
-    return {
-      hasNext: hasNext,
-      hasPrevios: hasPrevious,
-      items: cardsResponse,
-      total,
-      page: page,
-      pageSize: size,
-      totalPages,
-      statistics,
-    } as AppPaginatedResponseDto<PointTransactionResponseDto> & {
-      statistics: PointTransactionStatisticItemDto[];
-    };
+    return await this.sharedUserServiceClient.queryPointTransactions<
+      AppPaginatedResponseDto<PointTransactionViewRow> & {
+        statistics: PointTransactionStatisticItemDto[];
+      }
+    >(await this.toViewFilter(req));
   }
 
+  // Route xoa o 7.9 (nhanh tu xem). Toi luc do doc shared-user nhu bien nhan.
   async findOne(slug: string) {
     const context = `${PointTransactionService.name}.${this.findOne.name}`;
     this.logger.log(`Find point transaction: ${JSON.stringify(slug)}`, context);
 
-    const pt = await this.ptRepository.findOne({
-      where: {
-        slug: slug ?? IsNull(),
-      },
-      relations: ['user'],
-    });
-    if (!pt)
-      throw new PointTransactionException(
-        PointTransactionValidation.POINT_TRANSACTION_NOT_FOUND,
-      );
-    const response = this.mapper.map(
-      pt,
-      PointTransaction,
-      PointTransactionResponseDto,
-    );
-    await applyNestedUserFlags(
-      [[pt.user, response.user]],
-      this.sharedUserServiceClient,
-      this.logger,
-      context,
-    );
-    return response;
+    return await this.findViewRowBySlug(slug);
   }
 }
