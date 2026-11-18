@@ -24,10 +24,13 @@ import { SharedUserRefService } from './services/shared-user-ref.service';
 import { CoinPolicy } from 'src/gift-card-modules/coin-policy/entities/coin-policy.entity';
 import { Campaign } from 'src/campaign/entity/campaign.entity';
 import { SharedRedisModule } from './redis/shared-redis.module';
+import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
 
 @Module({
   imports: [
     SharedRedisModule,
+    // Buoc 7.7a: SharedCoinPolicyService doc so du qua shared-user.
+    SharedUserServiceModule,
     DbModule,
     TypeOrmModule.forFeature([
       Job,
