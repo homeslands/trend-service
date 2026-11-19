@@ -133,10 +133,15 @@ export class UserService {
     private readonly distributeLockJobQueue: Queue,
   ) {}
 
-  private isTodayBirthday(dobDM: string): boolean {
+  // Buoc 8.3: so ngay sinh vua nhap (DD/MM/YYYY) voi hom nay - khong con cot
+  // `dobDM` cuc bo (ngay sinh thuoc shared-user).
+  private isTodayBirthday(dob: string | null | undefined): boolean {
+    const [day, month] = dob ? dob.split('/') : [];
+    if (!day || !month) return false;
     const today = new Date();
-    const todayDM = `${String(today.getDate()).padStart(2, '0')}${String(today.getMonth() + 1).padStart(2, '0')}`;
-    return dobDM === todayDM;
+    return (
+      Number(day) === today.getDate() && Number(month) === today.getMonth() + 1
+    );
   }
 
   // Ghep field identity moi nhat tu shared-user vao 1 UserResponseDto da map
@@ -155,6 +160,7 @@ export class UserService {
       dob?: string;
       email?: string;
       address?: string;
+      language?: string;
       isVerifiedEmail?: boolean;
       isVerifiedPhonenumber?: boolean;
       isActive?: boolean;
@@ -188,14 +194,20 @@ export class UserService {
     // day la them field vao ca 8, tuc doi shape ngoai chu dich (muc 1.4;
     // `response-shape.spec.ts` bat dung cho nay ngay 26/10/2026).
     // Noi gan: `getAllUsers`, canh `membershipCard`.
-    if (!identity) return dto;
+    //
+    // Buoc 8.3: identity CHI lay tu shared-user, khong rot ve `dto` (map tu
+    // cot cuc bo, doi ten o 8.9). Khong co identity / shared-user de trong =>
+    // de trong (fail-closed, muc 1.7), khong hien ban cuc bo co the da cu.
+    // `language` ghep o day tu buoc nay vi cot cuc bo thoi duoc ghi
+    // (`updateUserLanguage`) - key da co trong response, chi doi nguon.
     return Object.assign(dto, {
-      phonenumber: identity.phonenumber ?? dto.phonenumber,
-      firstName: identity.firstName ?? dto.firstName,
-      lastName: identity.lastName ?? dto.lastName,
-      dob: identity.dob ?? dto.dob,
-      email: identity.email ?? dto.email,
-      address: identity.address ?? dto.address,
+      phonenumber: identity?.phonenumber,
+      firstName: identity?.firstName,
+      lastName: identity?.lastName,
+      dob: identity?.dob,
+      email: identity?.email,
+      address: identity?.address,
+      language: identity?.language,
     });
   }
 
@@ -254,9 +266,8 @@ export class UserService {
   // address) gio thuoc ve shared-user (architect-http.md muc 1.1) - phai ghi
   // sang do TRUOC (fail-closed: shared-user tra loi thi moi luu cuc bo, tranh
   // 2 ban lech nhau vinh vien neu shared-user tu choi vd trung SDT o noi
-  // khac), ket qua tra ve ghep tu response cua chinh lan goi do. Van luu lai
-  // ban sao cuc bo (khong xoa) vi cac module khac (xuat Excel, campaign sinh
-  // nhat...) van doc truc tiep cot cuc bo - ngoai pham vi dot sua nay.
+  // khac), ket qua tra ve ghep tu response cua chinh lan goi do. Tu buoc 8.3
+  // KHONG con luu ban sao identity cuc bo: lenh luu cuc bo chi con `branch`.
   //
   // 2 lenh ghi (shared-user + cuc bo) phai la 1 don vi nguyen tu
   // (architect-http.md muc 1.2 - bat buoc): neu buoc luu cuc bo phia duoi
@@ -318,10 +329,10 @@ export class UserService {
       throw new AuthException(AuthValidation.USER_NOT_FOUND);
     }
 
-    Object.assign(user, {
-      ...requestData,
-    });
-
+    // Buoc 8.3: KHONG chep `requestData` xuong hang cuc bo nua - truoc day
+    // `Object.assign(user, { ...requestData })` ghi ca ho ten / ngay sinh /
+    // email / dia chi vao cot cuc bo (doi ten o 8.9). Hang cuc bo chi con
+    // `branch` (ben duoi); identity ghi sang shared-user (`updateIdentity`).
     if (requestData.branch) {
       const branch = await this.branchRepository.findOne({
         where: { slug: requestData.branch },
@@ -333,10 +344,8 @@ export class UserService {
       user.branch = branch;
     }
 
-    if ('dob' in requestData) {
-      const [day, month] = requestData.dob ? requestData.dob.split('/') : [];
-      user.dobDM = day && month ? `${day}${month}` : null;
-    }
+    // Buoc 8.3: KHONG con ghi `dobDM` cuc bo - ngay sinh chi o shared-user
+    // (`updateIdentity` ben duoi), producer sinh nhat o shared-user (8.1).
 
     let identity: Awaited<
       ReturnType<SharedUserServiceClient['updateIdentity']>
@@ -363,11 +372,7 @@ export class UserService {
     try {
       const updatedUser = await this.userRepository.save(user);
       this.logger.log(`User ${user.id} updated profile`, context);
-      if (
-        requestData.dob &&
-        updatedUser.dobDM &&
-        this.isTodayBirthday(updatedUser.dobDM)
-      )
+      if (requestData.dob && this.isTodayBirthday(requestData.dob))
         this.eventEmitter.emit(CampaignAction.USER_BIRTHDAY_TRIGGERED, {
           user: updatedUser,
         });
@@ -477,25 +482,12 @@ export class UserService {
         );
         throw new AuthException(AuthValidation.NEED_UPDATE_PHONE_NUMBER);
       } else {
-        const existedPhonenumber = await this.userRepository.findOne({
-          where: {
-            phonenumber: requestData.phonenumber,
-          },
-        });
-        if (existedPhonenumber) {
-          this.logger.error(
-            AuthValidation.PHONE_NUMBER_ALREADY_EXISTS.message,
-            null,
-            context,
-          );
-          throw new AuthException(AuthValidation.PHONE_NUMBER_ALREADY_EXISTS);
-        }
         // Phonenumber la login key that su - thuoc ve shared-user
         // (architect-http.md muc 1.1). Ghi sang do TRUOC (fail-closed: neu
-        // shared-user tu choi - vd 409 vi da bi nguoi khac chiem giua luc
-        // check cuc bo va luc goi - thi khong duoc luu ban cuc bo, tranh 2
-        // ben lech nhau). Check cuc bo o tren chi la fast-fail, khong phai
-        // nguon that.
+        // shared-user tu choi thi khong duoc luu ban cuc bo, tranh 2 ben lech
+        // nhau). Buoc 8.3: bo phep tra trung "fast-fail" tren cot SDT cuc bo
+        // (doi ten o 8.9) - shared-user la noi duy nhat biet so da co chu
+        // chua, tra 409 => PHONE_NUMBER_ALREADY_EXISTS.
         try {
           updated = await this.sharedUserServiceClient.updateIdentity(
             user.sharedUserId,
@@ -516,6 +508,14 @@ export class UserService {
         }
         // Ghi guong theo RESPONSE, khong theo `requestData`: chep dung cai
         // shared-user DA LUU, khong phai cai minh XIN luu.
+        //
+        // ⚠ Buoc 8.3 CO Y GIU lenh ghi guong nay (khong ai DOC cot nay nua tu
+        // 8.2/8.3), vi cot `phonenumber_column` con NOT NULL + UNIQUE va hai
+        // duong TAO hang (`createUser`, `UserProvisioningService`) con chep
+        // SDT xuong do toi 8.8. Bo ghi o day thi khach doi so A -> B van giu
+        // A o cot cuc bo; nguoi sau dang ky bang so A se vap UNIQUE khi tao
+        // hang cuc bo (provision tra ERROR_CREATE_USER). Go cung luc voi hai
+        // duong tao o 8.8 (migration 8.9 `MODIFY ... NULL` truoc khi doi ten).
         Object.assign(user, {
           phonenumber: updated.phonenumber,
         });
@@ -594,15 +594,14 @@ export class UserService {
         // cua QD19 CHI TAO hang thieu, KHONG cap nhat hang cu. Khong co lop nao
         // keo cot nay ve - no lech cho toi khi GD8 drop cot.
         //
-        // Hau qua thuc te, chi MOT cho: TIM KHACH THEO SDT
-        // (`GET /user?phonenumber=` loc `Like` tren cot guong) se khong ra nguoi
-        // nay khi tra bang so MOI. Lop 1b cua QD19 phat hien duoc ca nay nhung
-        // co y khong sua ("Local phonenumber ... is stale, lookup-on-miss cannot
-        // surface it").
-        // Moi cho khac KHONG anh huong: response nao cung ghep identity tu
-        // shared-user (`mergeSharedUserIdentity`) nen so hien ra luon dung.
+        // Hau qua thuc te (do lai buoc 8.3): KHONG con cho nao DOC cot nay - tim
+        // theo SDT (`GET /user?phonenumber=`) hoi shared-user tu 8.2, tra trung
+        // khi tao hoi shared-user tu 8.3; response nao cung ghep identity tu
+        // shared-user. Con lai MOT rui ro: rang buoc UNIQUE - so CU con nam o
+        // hang nay, nguoi sau dang ky bang so do se vap UNIQUE khi tao hang
+        // cuc bo. Het khi 8.8 thoi ghi cot, 8.9 doi ten.
         this.logger.error(
-          `[MIRROR-LAG] local phonenumber mirror NOT written for ${user.slug} (shared-user already stored ${updated?.phonenumber}); local phone search will miss this customer until stage 8: ${error?.message}`,
+          `[MIRROR-LAG] local phonenumber mirror NOT written for ${user.slug} (shared-user already stored ${updated?.phonenumber}); the old number stays in the UNIQUE local column until stage 8.8: ${error?.message}`,
           error?.stack,
           context,
         );
@@ -613,8 +612,9 @@ export class UserService {
   // Tao user moi: trend quyet dinh role/branch (nghiep vu cua no), sau do
   // goi noi bo sang shared-user de luu lai identity (phonenumber, mat khau,
   // ho ten...) - dao nguoc thu tu so voi truoc khi tach (khi do trend tu
-  // luu het). Validate role/branch/trung SDT truoc khi goi sang shared-user
-  // de khong tao "rac" ben do neu request sai ngay tu dau.
+  // luu het). Validate role/branch truoc khi goi sang shared-user de khong
+  // tao "rac" ben do neu request sai ngay tu dau; trung SDT do shared-user
+  // bao (buoc 8.3).
   async createUser(requestData: CreateUserRequestDto) {
     const context = `${UserService.name}.${this.createUser.name}`;
 
@@ -631,13 +631,9 @@ export class UserService {
       if (!branch) throw new BranchException(BranchValidation.BRANCH_NOT_FOUND);
     }
 
-    const existingLocalUser = await this.userRepository.findOne({
-      where: { phonenumber: requestData.phonenumber },
-    });
-    if (existingLocalUser) {
-      throw new AuthException(AuthValidation.USER_EXISTS);
-    }
-
+    // Buoc 8.3: KHONG tra trung SDT tren cot cuc bo nua (doi ten o 8.9; ban
+    // guong co the cu). shared-user tu bao trung khi tao (400 `USER_EXISTS`
+    // / 409) => `USER_EXISTS` o nhanh catch ben duoi - mot nguon su that.
     let sharedUser: Awaited<ReturnType<SharedUserServiceClient['createUser']>>;
     try {
       sharedUser = await this.sharedUserServiceClient.createUser({
@@ -1026,20 +1022,12 @@ export class UserService {
       if (!this.userProvisioningService.isProvisionable(sharedUser.ownerService))
         return false;
 
-      const local =
-        await this.userProvisioningService.ensureLocalUser(sharedUser);
+      await this.userProvisioningService.ensureLocalUser(sharedUser);
 
-      // Hang cuc bo DA CO tu truoc nhung SDT cuc bo khac SDT that (khach doi
-      // so ben shared-user) => truy van lai van rong. Khong tu sua o day (day
-      // la duong doc), chi keu len de con dieu tra.
-      if (local.phonenumber !== sharedUser.phonenumber) {
-        this.logger.warn(
-          `Local phonenumber of sharedUserId=${sharedUser.id} is stale, lookup-on-miss cannot surface it`,
-          context,
-        );
-        return false;
-      }
-
+      // Buoc 8.3: bo phep so SDT cua hang cuc bo voi SDT that. Tu 8.2 bo loc
+      // SDT cua `GET /user` hoi shared-user (`search-by-phonenumber`) roi loc
+      // theo `sharedUserId`, nen guong SDT cuc bo cu khong con lam truy van
+      // lai ra rong - va cot do doi ten o 8.9.
       this.logger.log(
         `Lookup-on-miss ensured local user for sharedUserId=${sharedUser.id}`,
         context,
@@ -1514,26 +1502,20 @@ export class UserService {
     // Ghep identity moi nhat tu shared-user - danh sach dung de xuat file
     // cho nguoi dung xem/luu lai, khong the de ten/SDT/ngay sinh la ban cuc
     // bo co the cu (architect-http.md muc 1.1 quy tac 4, cung pattern
-    // getAllUsers). 1 lan goi batch, khong goi rieng tung dong. Fail-open:
-    // loi mang chi log warning, xuat file bang du lieu cuc bo thay vi lam
-    // hong ca request.
+    // getAllUsers). 1 lan goi batch, khong goi rieng tung dong.
+    // Buoc 8.3: FAIL-CLOSED (truoc la fail-open, rot ve cot cuc bo) - cot
+    // identity cuc bo doi ten o 8.9, khong con gi de rot ve; shared-user
+    // khong tra loi => 503, khong xuat mot file ten/SDT trong.
     const identityById = new Map<
       string,
       Awaited<ReturnType<SharedUserServiceClient['lookupByIds']>>[number]
     >();
-    try {
-      const sharedUserIds = users
-        .map((user) => user.sharedUserId)
-        .filter(Boolean);
-      const identities =
-        await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
-      identities.forEach((identity) => identityById.set(identity.id, identity));
-    } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich export identity from shared-user, falling back to local cache: ${error?.message}`,
-        context,
-      );
-    }
+    const sharedUserIds = users
+      .map((user) => user.sharedUserId)
+      .filter(Boolean);
+    const identities =
+      await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
+    identities.forEach((identity) => identityById.set(identity.id, identity));
 
     // Build workbook
     const workbook = new ExcelJS.Workbook();
@@ -1549,13 +1531,14 @@ export class UserService {
 
     users.forEach((user, index) => {
       const identity = identityById.get(user.sharedUserId);
-      const firstName = identity?.firstName ?? user.firstName;
-      const lastName = identity?.lastName ?? user.lastName;
-      const name = [firstName, lastName].filter(Boolean).join(' ').trim();
+      const name = [identity?.firstName, identity?.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
       worksheet.addRow({
         index: index + 1,
         name: name || 'N/A',
-        phonenumber: identity?.phonenumber ?? user.phonenumber ?? 'N/A',
+        phonenumber: identity?.phonenumber ?? 'N/A',
         dob: identity?.dob ?? 'N/A',
         role: user.role.name || 'N/A',
       });
@@ -1825,15 +1808,12 @@ export class UserService {
       throw new UserException(UserValidation.USER_NOT_FOUND);
     }
 
-    // `language` la mot field IDENTITY (architect-http.md muc 1.6) - truoc
-    // day route nay chi ghi cot cuc bo, nen ban `language` ben shared-user
-    // khong bao gio duoc cap nhat va 2 ben lech im lang. Nay ghi xuyen 2
-    // service theo dung muc 1.2: shared-user truoc, cuc bo sau, rollback
-    // neu buoc sau hong.
-    //
-    // Van GIU ban cuc bo (dual-write) vi ~15 cho trong trend (notification,
-    // campaign sinh nhat) con doc `user.language` truc tiep - go cac cho do
-    // thuoc giai doan 5, xem bang chan o progress/trend-api.md giai doan 2.
+    // `language` la mot field IDENTITY (architect-http.md muc 1.6), chi ghi o
+    // shared-user. Buoc 8.3: bo nua ghi cuc bo (dual-write tu giai doan 1) -
+    // cot doi ten o 8.9, va khong con cho nao trong trend doc `user.language`
+    // cuc bo (thong bao / sinh nhat doc `language` cua shared-user tu giai
+    // doan 4-5). Chi con mot lenh ghi nen khong con nhanh bu tru.
+    // Khong co identity => 404 (khong tao identity o day).
     const beforeIdentity = await this.sharedUserServiceClient.lookupById(
       user.sharedUserId,
     );
@@ -1851,26 +1831,6 @@ export class UserService {
       { language: requestData.language },
     );
 
-    user.language = requestData.language;
-    try {
-      await this.userRepository.save(user);
-    } catch (error) {
-      this.logger.error(
-        `Error when saving local language: ${error.message}`,
-        error.stack,
-        context,
-      );
-      await this.rollbackSharedUserIdentity(
-        user.sharedUserId,
-        { language: beforeIdentity.language },
-        { language: requestData.language },
-        context,
-      );
-      // Cung ma loi ma updateUser dung khi luu cuc bo that bai - khong dat
-      // them ma moi cho mot nhanh loi cung loai.
-      throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-    }
-
     this.logger.log(`User ${user.slug} language has been updated`, context);
 
     // Ghep identity moi nhat tu shared-user vao response - cung pattern
@@ -1880,17 +1840,19 @@ export class UserService {
     // khong them khong bot (muc 1.4).
     const dto = this.mapper.map(user, User, AuthProfileResponseDto);
     Object.assign(dto, {
-      phonenumber: identity.phonenumber ?? dto.phonenumber,
-      firstName: identity.firstName ?? dto.firstName,
-      lastName: identity.lastName ?? dto.lastName,
-      dob: identity.dob ?? dto.dob,
-      email: identity.email ?? dto.email,
-      address: identity.address ?? dto.address,
-      image: identity.image ?? dto.image,
+      // Buoc 8.3: chi lay tu shared-user - khong rot ve cot cuc bo (doi ten o
+      // 8.9); shared-user khong co gia tri thi de trong (fail-closed, muc 1.7).
+      phonenumber: identity.phonenumber,
+      firstName: identity.firstName,
+      lastName: identity.lastName,
+      dob: identity.dob,
+      email: identity.email,
+      address: identity.address,
+      image: identity.image,
       // Buoc 4.7: entity khong con hai co nen khong rot ve `dto` (undefined).
       isVerifiedEmail: identity.isVerifiedEmail ?? false,
       isVerifiedPhonenumber: identity.isVerifiedPhonenumber ?? false,
-      language: identity.language ?? dto.language,
+      language: identity.language,
     });
     return dto;
   }
