@@ -69,7 +69,6 @@ import { Branch } from 'src/branch/branch.entity';
 import { AuthException } from 'src/auth/auth.exception';
 import { AuthValidation } from 'src/auth/auth.validation';
 import { RoleEnum } from 'src/role/role.enum';
-import { SharedBalanceService } from 'src/shared/services/shared-balance.service';
 import { AuthProfileResponseDto } from 'src/auth/auth.dto';
 import {
   AccountRevenueCustomerType,
@@ -120,7 +119,6 @@ export class UserService {
     private readonly mapper: Mapper,
     @Inject(WINSTON_MODULE_NEST_PROVIDER)
     private readonly logger: Logger,
-    private readonly sharedBalanceService: SharedBalanceService,
     private readonly transactionManagerService: TransactionManagerService,
     private readonly eventEmitter: EventEmitter2,
     private readonly branchUtils: BranchUtils,
