@@ -37,6 +37,7 @@ import { AccumulatedPointService } from 'src/accumulated-point/accumulated-point
 import { FeatureFlagSystems } from 'src/feature-flag-system/feature-flag-system.constant';
 import { FeatureSystemGroups } from 'src/feature-flag-system/feature-flag-system.constant';
 import { FeatureFlagSystemService } from 'src/feature-flag-system/feature-flag-system.service';
+import { orderRef } from 'src/shared/constants/service-ref.constant';
 
 @Injectable()
 export class OrderItemService {
@@ -377,8 +378,11 @@ export class OrderItemService {
         if (voucher) await manager.save(voucher);
 
         // Cancel accumulated points reservation
+        // Buoc 2.15 — 2C: tham chieu `trend:<orderSlug>`. Ca ba cho trong tep
+        // nay lay `order` tu `orderUtils.getOrder` (nap du cot, khong hep
+        // `select:`) nen `order.slug` chac chan co.
         await this.accumulatedPointService.handleCancelReservation(
-          order.id,
+          orderRef(order.slug),
           null,
         );
         // Update accumulated points to use in order
@@ -557,8 +561,11 @@ export class OrderItemService {
         if (voucher) await manager.save(voucher);
 
         // Cancel accumulated points reservation
+        // Buoc 2.15 — 2C: tham chieu `trend:<orderSlug>`. Ca ba cho trong tep
+        // nay lay `order` tu `orderUtils.getOrder` (nap du cot, khong hep
+        // `select:`) nen `order.slug` chac chan co.
         await this.accumulatedPointService.handleCancelReservation(
-          order.id,
+          orderRef(order.slug),
           null,
         );
         // Update accumulated points to use in order
@@ -823,8 +830,11 @@ export class OrderItemService {
         await manager.save(menuItem);
 
         // Cancel accumulated points reservation
+        // Buoc 2.15 — 2C: tham chieu `trend:<orderSlug>`. Ca ba cho trong tep
+        // nay lay `order` tu `orderUtils.getOrder` (nap du cot, khong hep
+        // `select:`) nen `order.slug` chac chan co.
         await this.accumulatedPointService.handleCancelReservation(
-          order.id,
+          orderRef(order.slug),
           null,
         );
         // Update accumulated points to use in order
