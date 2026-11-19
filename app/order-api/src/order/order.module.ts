@@ -53,8 +53,6 @@ import { ACBConnectorModule } from 'src/acb-connector/acb-connector.module';
 import { PrinterJob } from 'src/printer/entity/printer-job.entity';
 import { PrinterModule } from 'src/printer/printer.module';
 import { AccumulatedPointService } from 'src/accumulated-point/accumulated-point.service';
-import { AccumulatedPointTransactionHistory } from 'src/accumulated-point/entities/accumulated-point-transaction-history.entity';
-import { AccumulatedPoint } from 'src/accumulated-point/entities/accumulated-point.entity';
 import { GoogleMapConnectorClient } from 'src/google-map/google-map-connector.client';
 import { HttpModule } from '@nestjs/axios';
 import { GoogleMapService } from 'src/google-map/google-map.service';
@@ -84,8 +82,6 @@ import { NotificationLanguageService } from 'src/notification/language/notificat
       Payment,
       ACBConnectorConfig,
       PrinterJob,
-      AccumulatedPoint,
-      AccumulatedPointTransactionHistory,
     ]),
     RobotConnectorModule,
     DbModule,

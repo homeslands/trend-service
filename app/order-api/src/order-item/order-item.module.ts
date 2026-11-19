@@ -30,8 +30,6 @@ import { ACBConnectorModule } from 'src/acb-connector/acb-connector.module';
 import { BankTransferStrategy } from 'src/payment/strategy/bank-transfer.strategy';
 import { ACBConnectorConfig } from 'src/acb-connector/acb-connector.entity';
 import { AccumulatedPointService } from 'src/accumulated-point/accumulated-point.service';
-import { AccumulatedPoint } from 'src/accumulated-point/entities/accumulated-point.entity';
-import { AccumulatedPointTransactionHistory } from 'src/accumulated-point/entities/accumulated-point-transaction-history.entity';
 
 @Module({
   imports: [
@@ -49,8 +47,6 @@ import { AccumulatedPointTransactionHistory } from 'src/accumulated-point/entiti
       Product,
       Payment,
       ACBConnectorConfig,
-      AccumulatedPoint,
-      AccumulatedPointTransactionHistory,
     ]),
     DbModule,
     OrderModule,
