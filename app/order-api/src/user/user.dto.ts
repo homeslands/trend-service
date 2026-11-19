@@ -2,7 +2,6 @@ import { AutoMap } from '@automapper/classes';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import { IsEnum, IsIn, IsNotEmpty, IsOptional } from 'class-validator';
-import { AccumulatedPointResponseDto } from 'src/accumulated-point/accumulated-point.dto';
 import { BaseQueryDto, BaseResponseDto } from 'src/app/base.dto';
 import {
   // INVALID_FIRSTNAME,
@@ -126,10 +125,6 @@ export class UserResponseDto extends BaseResponseDto {
   @AutoMap()
   @ApiProperty()
   isVerifiedPhonenumber: boolean;
-
-  @AutoMap(() => AccumulatedPointResponseDto)
-  @ApiProperty()
-  accumulatedPoint: AccumulatedPointResponseDto;
 
   @AutoMap()
   isActive: boolean;
