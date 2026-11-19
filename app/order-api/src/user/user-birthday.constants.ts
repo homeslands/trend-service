@@ -7,6 +7,21 @@ import { CampaignRewardType } from 'src/campaign/campaign.constants';
 export const SEND_BIRTHDAY_MULTI_CHANNEL_JOB = 'send-birthday-multi-channel';
 export const SEND_BIRTHDAY_EMAIL_JOB = 'send-birthday-email';
 
+// Job written by the birthday producer of shared-user (QD13, steps 6.16 and
+// 8.1): "this user has a birthday on birthdayDM". Same name and payload as
+// shared-user's user-birthday.constants.ts; the producer writes under this
+// service's BullMQ prefix (USER_BIRTHDAY_QUEUE_PREFIX on shared-user).
+export const USER_BIRTHDAY_TRIGGERED_JOB = 'user-birthday-triggered';
+
+export interface UserBirthdayTriggeredJobData {
+  // id of the user in shared-user (= User.sharedUserId here).
+  sharedUserId: string;
+  // Day and month of the birthday, DDMM.
+  birthdayDM: string;
+  // Year the producer ran in: a user is greeted once per campaign and year.
+  year: number;
+}
+
 // Channel a single birthday job targets.
 // MULTI_CHANNEL is one eSMS MultiChannelMessage call: Zalo first, then SMS.
 export enum BirthdayChannel {
