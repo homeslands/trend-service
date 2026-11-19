@@ -1249,6 +1249,36 @@ export class UserService {
     ];
   }
 
+  /**
+   * Buoc 8.1 (QD13) - route POST /user/birthday/trigger. Scheduler sinh nhat
+   * nay o shared-user: route chi kich producer ben do chay mot luot (day job
+   * `user-birthday-triggered` vao queue cua trend); cap thuong va gui loi
+   * chuc do `UserBirthdayConsumer` lam sau, bat dong bo. shared-user khong tra
+   * loi => 503 (`toReadError`).
+   * @returns cau bao cho nguoi bam nut.
+   */
+  async triggerBirthdayProducer(): Promise<string> {
+    const context = `${UserService.name}.${this.triggerBirthdayProducer.name}`;
+    const run = await this.sharedUserServiceClient.triggerBirthdayProducer();
+    if (!run?.enabled) {
+      this.logger.warn(
+        `Birthday producer of shared-user is off (USER_BIRTHDAY_QUEUE_PREFIX not set), nothing enqueued`,
+        context,
+      );
+      return 'Birthday producer of shared-user is off, nothing was enqueued';
+    }
+    this.logger.log(
+      `Birthday producer of shared-user ran: ${run.enqueued ?? 0}/${run.users ?? 0} job(s) for ${run.birthdayDM}${run.failed ? ' (failed part way)' : ''}`,
+      context,
+    );
+    if (run.failed) {
+      // Thuong gap nhat: mot luot khac (cron 17h hoac lan bam truoc trong 2
+      // phut) con giu khoa Redlock ben shared-user.
+      return `Birthday producer of shared-user did not finish (another run may hold its lock, try again in a few minutes): ${run.enqueued ?? 0} user(s) enqueued`;
+    }
+    return `Birthday producer has been triggered: ${run.enqueued ?? 0} user(s) enqueued`;
+  }
+
   async getAllUsers(
     query: GetAllUserQueryRequestDto,
   ): Promise<AppPaginatedResponseDto<UserResponseDto>> {

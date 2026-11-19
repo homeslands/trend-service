@@ -209,6 +209,15 @@ export interface SharedBalanceLookup {
 // Buoc 7.7d: bo loc cua nhom route "xem ho" (`/internal/point-transactions/*`).
 export type SharedPointTransactionViewRequest = Record<string, unknown>;
 
+// Ket qua mot luot producer sinh nhat cua shared-user (buoc 8.1).
+export interface SharedUserBirthdayProducerRun {
+  enabled: boolean;
+  birthdayDM?: string;
+  users?: number;
+  enqueued?: number;
+  failed?: boolean;
+}
+
 export interface SharedMembershipCardIssued {
   cardId: string;
   code: string;
@@ -384,6 +393,22 @@ export class SharedUserServiceClient {
       ) {
         throw new UserException(UserValidation.PHONENUMBER_SEARCH_TOO_BROAD);
       }
+      this.toReadError(error);
+    }
+  }
+
+  // Buoc 8.1 (QD13) - chay tay producer sinh nhat cua shared-user (route
+  // POST /user/birthday/trigger cua trend, nut "chay chien dich sinh nhat" o
+  // trend-ui). Producer chi DAY job `user-birthday-triggered`; cap thuong va
+  // gui loi chuc do UserBirthdayConsumer cua trend lam sau do, bat dong bo.
+  // `enabled: false` = shared-user chua dat USER_BIRTHDAY_QUEUE_PREFIX.
+  async triggerBirthdayProducer(): Promise<SharedUserBirthdayProducerRun> {
+    try {
+      return await this.post<SharedUserBirthdayProducerRun>(
+        'internal/users/birthday/trigger',
+        {},
+      );
+    } catch (error) {
       this.toReadError(error);
     }
   }

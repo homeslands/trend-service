@@ -53,8 +53,9 @@ export class CampaignScheduler {
   }
 
   // NOTE: Luồng cấp voucher sinh nhật theo ngày-of (1AM) đã được tạm ẩn để chỉ
-  // giữ một luồng sinh nhật duy nhất ở UserScheduler.BirthdayStrategyScheduler
-  // (chạy 4AM, gửi trước 1 ngày). Tránh chạy song song hai luồng USER_BIRTHDAY.
+  // giữ một luồng sinh nhật duy nhất: từ bước 8.1 là producer của shared-user
+  // (17h, gửi trước 1 ngày) + UserBirthdayConsumer.handleBirthdayTriggered ở
+  // trend. Tránh chạy song song hai luồng USER_BIRTHDAY.
   /*
   @Cron(CronExpression.EVERY_DAY_AT_1AM)
   async handleBirthdayCampaigns(): Promise<void> {
