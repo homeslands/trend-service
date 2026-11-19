@@ -140,7 +140,6 @@ export const getAccountRevenueClause = (
 ) => `
     SELECT
         u.slug_column AS customerSlug,
-        TRIM(CONCAT(COALESCE(u.first_name_column, ''), ' ', COALESCE(u.last_name_column, ''))) AS customerName,
         u.shared_user_id_column AS customerSharedUserId,
         u.created_at_column AS customerRegisteredAt,
         SUM(p.amount_column) AS totalAmount,${accountRevenuePaymentMethodSums}

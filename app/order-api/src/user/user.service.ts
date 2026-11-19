@@ -12,13 +12,12 @@ import {
   FindOptionsWhere,
   In,
   LessThanOrEqual,
-  Like,
   MoreThanOrEqual,
-  Raw,
   Repository,
 } from 'typeorm';
 import { User } from './user.entity';
 import { UserProvisioningService } from './user-provisioning.service';
+import { batchLookupSharedUserIdentities } from './user.helper';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QueueRegisterKey } from 'src/app/app.constants';
@@ -1279,6 +1278,36 @@ export class UserService {
     return `Birthday producer has been triggered: ${run.enqueued ?? 0} user(s) enqueued`;
   }
 
+  /**
+   * Buoc 8.2 - bo loc identity cua danh sach user (SDT chuoi con, khoang ngay
+   * sinh) loc TRUOC o shared-user: tra mang `sharedUserId` de ben goi loc
+   * `sharedUserId IN (...)`. Cot SDT / ngay sinh cuc bo bi doi ten o 8.9, va loc
+   * truoc (khong loc sau khi ghep) giu phan trang o DB dung.
+   * - `null` = khong co bo loc identity nao; co ca hai => giao hai mang.
+   * - Vuot tran => 400 (137007 / 137008, "tim hep lai", khong cat bot);
+   *   shared-user khong tra loi => 503 (fail-closed: day la bo loc chinh cua
+   *   response, roi ve cot cuc bo la sai lech D9). Cung khuon QD4 cua 7.1.
+   */
+  private async searchSharedUserIdsForFilter(filter: {
+    phonenumber?: string;
+    dob?: { type: DobFilterType; from?: string; to?: string };
+  }): Promise<string[] | null> {
+    const fragment = filter.phonenumber?.trim();
+    const dob = filter.dob?.from || filter.dob?.to ? filter.dob : undefined;
+    if (!fragment && !dob) return null;
+    const byPhonenumber = fragment
+      ? await this.sharedUserServiceClient.searchIdsByPhonenumber(fragment)
+      : null;
+    const byBirthday = dob
+      ? await this.sharedUserServiceClient.searchIdsByBirthday(dob)
+      : null;
+    if (byPhonenumber && byBirthday) {
+      const inRange = new Set(byBirthday);
+      return byPhonenumber.filter((id) => inRange.has(id));
+    }
+    return byPhonenumber ?? byBirthday;
+  }
+
   async getAllUsers(
     query: GetAllUserQueryRequestDto,
   ): Promise<AppPaginatedResponseDto<UserResponseDto>> {
@@ -1293,8 +1322,6 @@ export class UserService {
     const whereOptions: FindOptionsWhere<User> = {};
     if (query.slug) whereOptions.slug = query.slug;
     if (query.branch) whereOptions.branch = { slug: query.branch };
-    if (query.phonenumber)
-      whereOptions.phonenumber = Like(`%${query.phonenumber}%`);
     if (!_.isEmpty(query.role))
       whereOptions.role = {
         name: In(query.role),
@@ -1330,33 +1357,23 @@ export class UserService {
       whereOptions.createdAt = LessThanOrEqual(new Date(query.endDate));
     }
 
-    if (query.birthdayFromDate || query.birthdayToDate) {
-      // dobDM is stored as ddmm; reorder to mmdd for correct chronological comparison
-      const toMMDD = (ddmm: string) => {
-        const [day, month] = ddmm.split('/');
-        return `${month}${day}`;
-      };
-      const fromMMDD = query.birthdayFromDate
-        ? toMMDD(query.birthdayFromDate)
-        : '0101';
-      const toMMDDValue = query.birthdayToDate
-        ? toMMDD(query.birthdayToDate)
-        : '1231';
-      const reorderedExpr = (alias: string) =>
-        `CONCAT(SUBSTRING(${alias}, 3, 2), SUBSTRING(${alias}, 1, 2))`;
-
-      whereOptions.dobDM =
-        fromMMDD <= toMMDDValue
-          ? Raw(
-              (alias) =>
-                `${alias} IS NOT NULL AND ${reorderedExpr(alias)} BETWEEN :fromMMDD AND :toMMDD`,
-              { fromMMDD, toMMDD: toMMDDValue },
-            )
-          : Raw(
-              (alias) =>
-                `${alias} IS NOT NULL AND (${reorderedExpr(alias)} >= :fromMMDD OR ${reorderedExpr(alias)} <= :toMMDD)`,
-              { fromMMDD, toMMDD: toMMDDValue },
-            );
+    // Buoc 8.2 - SDT (chuoi con) va khoang sinh nhat (DD/MM, bo nam) loc truoc o
+    // shared-user (`searchSharedUserIdsForFilter`) thay cho `Like` / `dobDM` tren
+    // cot cuc bo. Khong ai khop => `In([])` = 0 dong (TypeORM sinh `0=1`).
+    // Loc theo the (o tren) da chot mot nguoi => giao voi mang nay.
+    const identityIds = await this.searchSharedUserIdsForFilter({
+      phonenumber: query.phonenumber,
+      dob: {
+        type: DobFilterType.DAY_MONTH,
+        from: query.birthdayFromDate,
+        to: query.birthdayToDate,
+      },
+    });
+    if (identityIds !== null) {
+      const cardOwner = whereOptions.sharedUserId as string | undefined;
+      whereOptions.sharedUserId = In(
+        cardOwner ? identityIds.filter((id) => id === cardOwner) : identityIds,
+      );
     }
 
     // Construct find many options
@@ -1460,57 +1477,6 @@ export class UserService {
   }
 
   /**
-   * Parse a date-of-birth range bound into a comparable numeric key according to
-   * the granularity (`day` | `month` | `day_month`). The year is always ignored.
-   * - day: `5` / `05` -> 5
-   * - month: `6` / `06` -> 6
-   * - day_month: `01/06` (DD/MM) -> 601 (month * 100 + day)
-   */
-  private parseDobBound(value: string, type: DobFilterType): number {
-    if (type === DobFilterType.DAY_MONTH) {
-      const match = value.match(/^(\d{1,2})\/(\d{1,2})$/);
-      if (!match)
-        throw new BadRequestException(
-          `Invalid date of birth bound "${value}". Expected DD/MM`,
-        );
-      const day = parseInt(match[1], 10);
-      const month = parseInt(match[2], 10);
-      if (day < 1 || day > 31 || month < 1 || month > 12)
-        throw new BadRequestException(
-          `Invalid date of birth bound "${value}". Day must be 1-31, month 1-12`,
-        );
-      return month * 100 + day;
-    }
-
-    if (!/^\d{1,2}$/.test(value))
-      throw new BadRequestException(
-        `Invalid date of birth bound "${value}". Expected a number`,
-      );
-    const num = parseInt(value, 10);
-    const max = type === DobFilterType.MONTH ? 12 : 31;
-    if (num < 1 || num > max)
-      throw new BadRequestException(
-        `Invalid date of birth bound "${value}". Must be 1-${max}`,
-      );
-    return num;
-  }
-
-  /**
-   * Build a comparable numeric key from a user's `dob` (DD/MM/YYYY string),
-   * matching the granularity used by {@link parseDobBound}. Returns null when
-   * the dob is missing or invalid.
-   */
-  private dobToKey(dob: string, type: DobFilterType): number | null {
-    const parsed = moment(dob, 'DD/MM/YYYY', true);
-    if (!parsed.isValid()) return null;
-    const day = parsed.date();
-    const month = parsed.month() + 1;
-    if (type === DobFilterType.DAY) return day;
-    if (type === DobFilterType.MONTH) return month;
-    return month * 100 + day;
-  }
-
-  /**
    * Export users to an Excel file containing name, phone number and date of birth.
    * Supports filtering by branch, phone number and a date of birth range that
    * matches by day, month or day+month (the year is ignored).
@@ -1521,45 +1487,29 @@ export class UserService {
     const context = `${UserService.name}.${this.exportUsersToExcel.name}`;
 
     const whereOptions: FindOptionsWhere<User> = {};
-    if (query.phonenumber)
-      whereOptions.phonenumber = Like(`%${query.phonenumber}%`);
-
     if (!_.isEmpty(query.role))
       whereOptions.role = {
         name: In(query.role),
       };
 
-    let users = await this.userRepository.find({
+    // Buoc 8.2 - SDT va khoang ngay sinh (theo ngay / thang / ngay+thang, bo
+    // nam) loc truoc o shared-user, thay cho `Like` tren cot SDT va loc trong
+    // bo nho tren `user.dob` cuc bo (doi ten o 8.9 => file rong im lang).
+    const identityIds = await this.searchSharedUserIdsForFilter({
+      phonenumber: query.phonenumber,
+      dob: {
+        type: query.dobFilterType ?? DobFilterType.DAY_MONTH,
+        from: query.dobStartDate,
+        to: query.dobEndDate,
+      },
+    });
+    if (identityIds !== null) whereOptions.sharedUserId = In(identityIds);
+
+    const users = await this.userRepository.find({
       relations: { branch: true, role: true },
       where: whereOptions,
       order: { createdAt: 'DESC' },
     });
-
-    // Filter by date of birth range (dob stored as DD/MM/YYYY; year ignored)
-    if (query.dobStartDate || query.dobEndDate) {
-      const type = query.dobFilterType ?? DobFilterType.DAY_MONTH;
-      const start = query.dobStartDate
-        ? this.parseDobBound(query.dobStartDate, type)
-        : null;
-      const end = query.dobEndDate
-        ? this.parseDobBound(query.dobEndDate, type)
-        : null;
-
-      users = users.filter((user) => {
-        if (!user.dob) return false;
-        const key = this.dobToKey(user.dob, type);
-        if (key === null) return false;
-        if (start !== null && end !== null) {
-          // Support wrap-around ranges (e.g. 25/12 -> 05/01)
-          return start <= end
-            ? key >= start && key <= end
-            : key >= start || key <= end;
-        }
-        if (start !== null) return key >= start;
-        if (end !== null) return key <= end;
-        return true;
-      });
-    }
 
     // Ghep identity moi nhat tu shared-user - danh sach dung de xuat file
     // cho nguoi dung xem/luu lai, khong the de ten/SDT/ngay sinh la ban cuc
@@ -1606,7 +1556,7 @@ export class UserService {
         index: index + 1,
         name: name || 'N/A',
         phonenumber: identity?.phonenumber ?? user.phonenumber ?? 'N/A',
-        dob: identity?.dob ?? user.dob ?? 'N/A',
+        dob: identity?.dob ?? 'N/A',
         role: user.role.name || 'N/A',
       });
     });
@@ -1771,36 +1721,29 @@ export class UserService {
           ),
         ]);
 
-    // Ghep ten khach hang moi nhat tu shared-user - customerName tu raw SQL
-    // la ban cuc bo co the cu (architect-http.md muc 1.1 quy tac 4, cung
-    // pattern getAllUsers/exportUsersToExcel). 1 lan goi batch. Fail-open:
-    // loi mang chi log warning, dung ban cuc bo thay vi lam hong ca request.
+    // Ten khach chi con o shared-user (buoc 8.2: SQL tho khong con
+    // `CONCAT(first_name, last_name)` cuc bo - cot do doi ten o 8.9 => 500).
+    // MOT luot batch; shared-user khong tra loi => 503 (fail-closed, nhu bo loc
+    // SDT phia tren - khong con ten cuc bo de roi ve).
+    const identities = await batchLookupSharedUserIdentities(
+      results.map((item) => item.customerSharedUserId),
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
     const customerNameById = new Map<string, string>();
-    try {
-      const sharedUserIds = results
-        .map((item) => item.customerSharedUserId)
-        .filter(Boolean);
-      const identities =
-        await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
-      identities.forEach((identity) => {
-        const name = [identity.firstName, identity.lastName]
-          .filter(Boolean)
-          .join(' ')
-          .trim();
-        if (name) customerNameById.set(identity.id, name);
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich account revenue customer name from shared-user, falling back to local cache: ${error?.message}`,
-        context,
-      );
-    }
+    identities.forEach((identity) => {
+      const name = [identity.firstName, identity.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (name) customerNameById.set(identity.id, name);
+    });
 
     const customers: AccountRevenueCustomerResponseDto[] = results.map(
       (item) => ({
         customerSlug: item.customerSlug,
-        customerName:
-          customerNameById.get(item.customerSharedUserId) || item.customerName,
+        customerName: customerNameById.get(item.customerSharedUserId) ?? '',
         customerRegisteredAt: moment(item.customerRegisteredAt).toDate(),
         totalAmount: Number(item.totalAmount),
         totalAmountPoint: Number(item.totalAmountPoint),
