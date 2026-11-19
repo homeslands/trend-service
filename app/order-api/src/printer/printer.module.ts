@@ -26,6 +26,7 @@ import { PrinterEventUtils } from './printer-event/printer-event.utils';
 import { FirebaseDeviceToken } from 'src/notification/firebase/firebase-device-token.entity';
 import { FirebaseService } from 'src/notification/firebase/firebase.service';
 import { UserModule } from 'src/user/user.module';
+import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
 import { User } from 'src/user/user.entity';
 import { PrinterController } from './printer.controller';
 import { PrinterConnectorModule } from 'src/printer-connector/printer-connector.module';
@@ -54,6 +55,8 @@ import { Payment } from 'src/payment/entity/payment.entity';
     DbModule,
     UserModule,
     PrinterConnectorModule,
+    // PrinterEventUtils ghep ten + ngon ngu tu shared-user (buoc 4.3).
+    SharedUserServiceModule,
   ],
   controllers: [PrinterController],
   providers: [
