@@ -88,7 +88,6 @@ import { RevenueException } from 'src/revenue/revenue.exception';
 import { BranchUtils } from 'src/branch/branch.utils';
 import moment from 'moment';
 import ExcelJS from 'exceljs';
-import { TransactionManagerService } from 'src/db/transaction-manager.service';
 import { CampaignAction } from 'src/campaign/campaign.constants';
 import {
   SharedUserLookupResponse,
@@ -119,7 +118,6 @@ export class UserService {
     private readonly mapper: Mapper,
     @Inject(WINSTON_MODULE_NEST_PROVIDER)
     private readonly logger: Logger,
-    private readonly transactionManagerService: TransactionManagerService,
     private readonly eventEmitter: EventEmitter2,
     private readonly branchUtils: BranchUtils,
     private readonly sharedUserServiceClient: SharedUserServiceClient,
@@ -463,9 +461,6 @@ export class UserService {
         requirement.scope === UserRequirementScope.INITIAL,
     );
 
-    // Ket qua that su cua lenh ghi xa - nguon de chep xuong cot guong.
-    let updated: SharedUserLookupResponse | null = null;
-
     if (blockedPhonenumberRequirement) {
       // So voi SDT THAT ben shared-user (`identity`), KHONG so voi cot guong
       // cuc bo. Cot guong duoc phep cu (khach doi so o service khac, lop bu
@@ -487,10 +482,9 @@ export class UserService {
         // (doi ten o 8.9) - shared-user la noi duy nhat biet so da co chu
         // chua, tra 409 => PHONE_NUMBER_ALREADY_EXISTS.
         try {
-          updated = await this.sharedUserServiceClient.updateIdentity(
-            user.sharedUserId,
-            { phonenumber: requestData.phonenumber },
-          );
+          await this.sharedUserServiceClient.updateIdentity(user.sharedUserId, {
+            phonenumber: requestData.phonenumber,
+          });
         } catch (error) {
           this.logger.error(
             `Error updating phonenumber on shared-user: ${error.message}`,
@@ -504,19 +498,6 @@ export class UserService {
             AuthValidation.ERROR_COMPLETE_USER_REGISTRATION,
           );
         }
-        // Ghi guong theo RESPONSE, khong theo `requestData`: chep dung cai
-        // shared-user DA LUU, khong phai cai minh XIN luu.
-        //
-        // ⚠ Buoc 8.3 CO Y GIU lenh ghi guong nay (khong ai DOC cot nay nua tu
-        // 8.2/8.3), vi cot `phonenumber_column` con NOT NULL + UNIQUE va hai
-        // duong TAO hang (`createUser`, `UserProvisioningService`) con chep
-        // SDT xuong do toi 8.8. Bo ghi o day thi khach doi so A -> B van giu
-        // A o cot cuc bo; nguoi sau dang ky bang so A se vap UNIQUE khi tao
-        // hang cuc bo (provision tra ERROR_CREATE_USER). Go cung luc voi hai
-        // duong tao o 8.8 (migration 8.9 `MODIFY ... NULL` truoc khi doi ten).
-        Object.assign(user, {
-          phonenumber: updated.phonenumber,
-        });
         // KHONG danh dau requirement o day nua (QD22, buoc 2.5):
         // `update-identity` cua shared-user tu chuyen
         // NEED_UPDATE_PHONE_NUMBER sang COMPLETED khi SDT doi - cung mot
@@ -553,57 +534,15 @@ export class UserService {
     // day la viec can quyet dinh rieng, khong phai sua tien tay o day. Xem
     // progress/trend-api.md muc "Bo sung (2026-09-04)".
 
-    // Ghi guong. Hong thi KHONG bu tru lui (doi tu buoc 2.5).
-    await this.transactionManagerService.execute<void>(
-      async (manager) => {
-        // Chi con hang `user` cuc bo (cot `phonenumber` con song toi GD8).
-        // Requirement da do shared-user tu dong trong `update-identity`.
-        await manager.save(user);
-      },
-      () => {
-        this.logger.log(
-          `User ${user.slug} registration has been completed`,
-          context,
-        );
-      },
-      (error) => {
-        // KHONG nem - ca chu dich, khong phai bo sot.
-        // `TransactionManagerService.execute` da rollback truoc khi goi callback
-        // nay va CHI nem tiep neu callback nem. Khong nem nghia la: guong khong
-        // ghi duoc, nhung request van THANH CONG (204).
-        //
-        // Vi sao khong bu tru ve shared-user:
-        // - Lenh ghi duy nhat o day la cot `phonenumber_column` cuc bo - mot
-        //   GUONG cua shared-user, song toi GD8 (doi ten 8.9, drop 10.3). Su
-        //   that DA ghi dung: khach that su da doi SDT, va requirement da
-        //   COMPLETED trong cung transaction do ben shared-user.
-        // - SAI huong: huy mot lenh ghi da thanh cong vao nguon su that chi vi
-        //   cap nhat guong hong;
-        // - KHONG DU: `update-identity` con mot hieu ung phu la dat requirement
-        //   ve COMPLETED, ma lenh bu tru (chi ghi lai phonenumber) khong mo lai
-        //   duoc - bu tru xong van lech;
-        // - DAP LEN NGUOI KHAC: giua luc ta ghi va luc ta bu tru, mot luot khac
-        //   co the da doi SDT sang gia tri thu ba; ghi de "gia tri cu" len do la
-        //   lost update tren chinh du lieu dang nhap.
-        //
-        // ⚠ GUONG KHONG TU SUA. Do lai 31/10/2026:
-        // `UserProvisioningService.provisionLocalUser` thoat som khi hang da ton
-        // tai (`if (existed) return`), nen lop 1 (sync-on-read) va lop 3 (cron)
-        // cua QD19 CHI TAO hang thieu, KHONG cap nhat hang cu. Khong co lop nao
-        // keo cot nay ve - no lech cho toi khi GD8 drop cot.
-        //
-        // Hau qua thuc te (do lai buoc 8.3): KHONG con cho nao DOC cot nay - tim
-        // theo SDT (`GET /user?phonenumber=`) hoi shared-user tu 8.2, tra trung
-        // khi tao hoi shared-user tu 8.3; response nao cung ghep identity tu
-        // shared-user. Con lai MOT rui ro: rang buoc UNIQUE - so CU con nam o
-        // hang nay, nguoi sau dang ky bang so do se vap UNIQUE khi tao hang
-        // cuc bo. Het khi 8.8 thoi ghi cot, 8.9 doi ten.
-        this.logger.error(
-          `[MIRROR-LAG] local phonenumber mirror NOT written for ${user.slug} (shared-user already stored ${updated?.phonenumber}); the old number stays in the UNIQUE local column until stage 8.8: ${error?.message}`,
-          error?.stack,
-          context,
-        );
-      },
+    // Buoc 8.8: HET ghi guong. Truoc day cho nay luu hang `user` cuc bo de chep
+    // SDT moi xuong `phonenumber_column` (NOT NULL + UNIQUE, lech la vap UNIQUE
+    // khi nguoi sau dang ky bang so cu - nhat ky `[MIRROR-LAG]`). Cot da roi
+    // entity, doi ten `_deprecated_*` o 8.9: SDT chi con o shared-user, va
+    // `update-identity` o tren da ghi + dong requirement trong cung mot
+    // transaction ben do. Khong con gi de ghi o trend.
+    this.logger.log(
+      `User ${user.slug} registration has been completed`,
+      context,
     );
   }
 
@@ -685,7 +624,7 @@ export class UserService {
     const user =
       existedLocalUser ??
       this.userRepository.create({
-        phonenumber: sharedUser.phonenumber,
+        // Buoc 8.8: khong chep SDT xuong nua - cot da roi entity.
         sharedUserId: sharedUser.id,
       });
     // Y dinh cua lenh tao thang ban role mac dinh ma lop khac vua gan.
