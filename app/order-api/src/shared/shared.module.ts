@@ -20,6 +20,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { GiftCard } from 'src/gift-card-modules/gift-card/entities/gift-card.entity';
 import { SharedExportFileService } from './services/shared-export-file.service';
 import { SharedCoinPolicyService } from './services/shared-coin-policy.service';
+import { SharedUserRefService } from './services/shared-user-ref.service';
 import { CoinPolicy } from 'src/gift-card-modules/coin-policy/entities/coin-policy.entity';
 import { Campaign } from 'src/campaign/entity/campaign.entity';
 import { SharedRedisModule } from './redis/shared-redis.module';
@@ -54,12 +55,16 @@ import { SharedRedisModule } from './redis/shared-redis.module';
     SharedPointTransactionService,
     SharedExportFileService,
     SharedCoinPolicyService,
+    // Chua ai inject o giai doan 2 (noi dung dau tien: giai doan 5). Dang ky
+    // ngay de dot do chi viec inject - xem ghi chu dau service.
+    SharedUserRefService,
   ],
   exports: [
     SharedBalanceService,
     SharedPointTransactionService,
     SharedExportFileService,
     SharedCoinPolicyService,
+    SharedUserRefService,
   ],
 })
 export class SharedModule {}
