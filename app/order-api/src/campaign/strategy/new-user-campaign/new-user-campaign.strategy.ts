@@ -25,7 +25,13 @@ import { CoinCampaignTemplate } from '../../entity/coin-campaign-template.entity
 import { CampaignStatus } from '../../campaign.constants';
 import { CampaignException } from '../../campaign.exception';
 import { CampaignValidation } from '../../campaign.validation';
-import { ICampaignStrategy } from '../campaign.strategy';
+import {
+  CampaignIdentities,
+  ICampaignStrategy,
+  requireCampaignIdentity,
+} from '../campaign.strategy';
+import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { batchLookupSharedUserIdentities } from 'src/user/user.helper';
 import { RoleEnum } from 'src/role/role.enum';
 import { NotificationService } from 'src/notification/notification.service';
 import { NotificationLanguageService } from 'src/notification/language/notification-language.service';
@@ -43,19 +49,43 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     private readonly sharedBalanceService: SharedBalanceService,
     private readonly notificationService: NotificationService,
     private readonly notificationLanguageService: NotificationLanguageService,
+    private readonly sharedUserServiceClient: SharedUserServiceClient,
   ) {}
 
-  async execute(campaign: Campaign, user: User): Promise<CampaignRecipient> {
+  async execute(
+    campaign: Campaign,
+    user: User,
+    identities?: CampaignIdentities,
+  ): Promise<CampaignRecipient> {
+    const context = `${NewUserCampaignStrategy.name}.${this.execute.name}`;
+    // Buoc 5.6: ngon ngu thong bao lay tu shared-user, tra TRUOC lenh ghi
+    // (giu ngan sach xu / tao voucher) - khong tra duoc thi bo qua nguoi nay
+    // (xem `requireCampaignIdentity`).
+    const identity = requireCampaignIdentity(
+      identities ??
+        (await batchLookupSharedUserIdentities(
+          [user.sharedUserId],
+          this.sharedUserServiceClient,
+          this.logger,
+          context,
+        )),
+      user,
+      this.logger,
+      context,
+    );
+    const language = identity.language ?? 'vi';
+
     // Reward type is implied by which template the campaign carries.
     if (campaign.coinCampaignTemplate) {
-      return this.executeCoinGift(campaign, user);
+      return this.executeCoinGift(campaign, user, language);
     }
-    return this.executeVoucherGift(campaign, user);
+    return this.executeVoucherGift(campaign, user, language);
   }
 
   private async executeVoucherGift(
     campaign: Campaign,
     user: User,
+    language: string,
   ): Promise<CampaignRecipient> {
     const context = `${NewUserCampaignStrategy.name}.${this.executeVoucherGift.name}`;
 
@@ -152,7 +182,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
           voucherTitle: createdVoucher.title,
           voucherCode: createdVoucher.code,
         },
-        user.language ?? 'vi',
+        language,
       );
       await this.notificationService.create({
         receiverId: user.id,
@@ -175,9 +205,11 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     return recipient;
   }
 
+  // Buoc 5.5: doi dich o 7.4 ⇒ gui kem campaignIdempotencyKey(<slug campaign>, <sharedUserId nguoi nhan>) (`shared/constants/service-ref.constant.ts`).
   private async executeCoinGift(
     campaign: Campaign,
     user: User,
+    language: string,
   ): Promise<CampaignRecipient> {
     const context = `${NewUserCampaignStrategy.name}.${this.executeCoinGift.name}`;
 
@@ -186,6 +218,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     let closedAfterGrant = false;
     let remainingAtExhaustion = 0;
     let coinPerUserNeeded = 0;
+    let alreadyGranted: CampaignRecipient | null = null;
 
     // 1. Reserve the coins and record the recipient atomically. The template
     // row is locked so concurrent registrations cannot overspend the budget.
@@ -194,6 +227,18 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
         where: { id: campaign.coinCampaignTemplate.id },
         lock: { mode: 'pessimistic_write' },
       });
+
+      // Buoc 5.7 (5.2(b)): mot khach chi nhan thuong khach-moi MOT lan, kiem
+      // NGAY TRONG transaction nay, SAU khoa template o tren: hai luot dong
+      // thoi cho cung mot khach (hai event, hai instance) xep hang o khoa do,
+      // luot sau doc thay hang cua luot truoc. `checkEligibility` cua
+      // `triggerForUser` doc NGOAI transaction nen ca hai luot deu qua, con
+      // UNIQUE (campaign, user, year) khong chan vi `year = null` (MySQL khong
+      // so NULL voi NULL).
+      alreadyGranted = await manager.findOne(CampaignRecipient, {
+        where: { campaign: { id: campaign.id }, user: { id: user.id } },
+      });
+      if (alreadyGranted) return alreadyGranted;
 
       const coinPerUser = Number(template.coinPerUser);
 
@@ -239,6 +284,15 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
       return manager.save(recipientEntity);
     });
 
+    if (alreadyGranted) {
+      // Khong giu ngan sach, khong cong xu, khong thong bao lan hai.
+      this.logger.warn(
+        `[NEW_USER][COIN] User ${user.id} already received campaign ${campaign.slug}, skip (no coins credited)`,
+        context,
+      );
+      return recipient;
+    }
+
     if (budgetExhausted) {
       // Out of coins before this user could be served: stop the campaign and
       // let the admins know; the registering user gets no coins.
@@ -275,17 +329,24 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     // ban ghi `user` da tra san o tren, khong tra lai va khong doc cot slug.
     const sharedUserId = user.sharedUserId;
 
+    // Buoc 5.7 - CHUA XONG PHAN VI: ba lenh duoi day VAN ghi bang cuc bo cua
+    // trend. Doi dich o 7.4(b): cong vao vi o shared-user (kem
+    // campaignIdempotencyKey), bo luot doc-sau-cong, so xu do vi ghi. Dung coi
+    // campaign la "da don xong vi" sau giai doan 5.
+    // 7.4(b): doi dich - lenh cong xu IN.
     await this.sharedBalanceService.calcBalance({
       sharedUserId,
       points: grantedCoin,
       type: PointTransactionTypeEnum.IN,
     });
 
+    // 7.4(b): bo - luot doc-sau-cong (vi tra so du sau khi cong).
     const currentBalance = await this.sharedBalanceService.findOneByField({
       sharedUserId,
       slug: null,
     });
 
+    // 7.4(b): doi dich - so xu `objectType=CAMPAIGN` (vi ghi so).
     await this.sharedPointTransactionService.create({
       type: PointTransactionTypeEnum.IN,
       desc: `Tặng ${grantedCoin.toLocaleString()} xu chào mừng thành viên mới từ chiến dịch ${campaign.name}`,
@@ -306,7 +367,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
       const { title, body } = this.notificationLanguageService.format(
         NotificationMessageCode.COIN_NEW_USER_RECEIVED,
         { points: grantedCoin.toLocaleString() },
-        user.language ?? 'vi',
+        language,
       );
       await this.notificationService.create({
         receiverId: user.id,
@@ -346,7 +407,27 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
         where: { role: { name: In([RoleEnum.Admin, RoleEnum.SuperAdmin]) } },
       });
 
+      // Buoc 5.6: MOT luot lookupByIds cho ca nhom admin (khong tra trong vong
+      // lap). Admin khong tra duoc thi bo qua + log, cac admin khac van nhan;
+      // shared-user khong tra loi => nem 503, catch duoi ghi log (best-effort).
+      const identityById = await batchLookupSharedUserIdentities(
+        admins.map((admin) => admin.sharedUserId),
+        this.sharedUserServiceClient,
+        this.logger,
+        context,
+      );
+
       for (const admin of admins) {
+        const identity = admin.sharedUserId
+          ? identityById.get(admin.sharedUserId)
+          : undefined;
+        if (!identity) {
+          this.logger.warn(
+            `[NEW_USER][COIN] Admin ${admin.id} has no shared-user identity (sharedUserId=${admin.sharedUserId ?? 'null'}), skip budget alert`,
+            context,
+          );
+          continue;
+        }
         const { title, body } = this.notificationLanguageService.format(
           NotificationMessageCode.COIN_CAMPAIGN_BUDGET_EXHAUSTED,
           {
@@ -354,7 +435,7 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
             remainingCoin: remainingCoin.toLocaleString(),
             coinPerUser: coinPerUser.toLocaleString(),
           },
-          admin.language ?? 'vi',
+          identity.language ?? 'vi',
         );
         await this.notificationService.create({
           receiverId: admin.id,

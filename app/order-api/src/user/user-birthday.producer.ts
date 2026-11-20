@@ -4,6 +4,7 @@ import { JobsOptions, Queue } from 'bullmq';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { QueueRegisterKey } from 'src/app/app.constants';
 import { AvailableBirthdayCampaign } from 'src/campaign/campaign.constants';
+import { SharedUserLookupResponse } from 'src/external-services/shared-user-service/shared-user-service.client';
 import { User } from './user.entity';
 import {
   BirthdayJobData,
@@ -28,15 +29,21 @@ export class UserBirthdayProducer {
   async enqueueUser(
     user: User,
     campaign: AvailableBirthdayCampaign,
+    identity: SharedUserLookupResponse,
   ): Promise<void> {
     const context = `${UserBirthdayProducer.name}.${this.enqueueUser.name}`;
+    // Buoc 5.6 (5.2(a)): noi dung loi chuc (SDT, email, ho ten) lay tu
+    // `identity` cua shared-user ma nguoi goi da tra MOT luot cho ca lo - KHONG
+    // chep tu ban sao cuc bo cua `User`, va khong roi ve email / SDT cuc bo khi
+    // identity thieu (khong bao gio gui toi dia chi cache cu - nhu buoc 4.4).
+    // `id` / `slug` van la khoa cua trend (khoa job, tra voucher, log).
     const data: BirthdayJobData = {
       id: user.id,
       slug: user.slug,
-      phonenumber: user.phonenumber,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
+      phonenumber: identity.phonenumber,
+      email: identity.email,
+      firstName: identity.firstName,
+      lastName: identity.lastName,
       campaignId: campaign.id,
       campaignSlug: campaign.slug,
       rewardType: campaign.rewardType,
@@ -52,7 +59,7 @@ export class UserBirthdayProducer {
     const enqueued: string[] = [];
 
     // Congrats message is campaign-agnostic -> one per user (deduped across campaigns).
-    if (user.phonenumber) {
+    if (data.phonenumber) {
       await this.birthdayQueue.add(SEND_BIRTHDAY_MULTI_CHANNEL_JOB, data, {
         ...baseOpts,
         jobId: `${SEND_BIRTHDAY_MULTI_CHANNEL_JOB}:${user.id}`,
@@ -61,7 +68,7 @@ export class UserBirthdayProducer {
     }
 
     // Email content is campaign-specific -> one per campaign.
-    if (user.email) {
+    if (data.email) {
       await this.birthdayQueue.add(SEND_BIRTHDAY_EMAIL_JOB, data, {
         ...baseOpts,
         jobId: `${SEND_BIRTHDAY_EMAIL_JOB}:${campaign.id}:${user.id}`,
