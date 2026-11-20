@@ -15,6 +15,8 @@ import { DistributeLockJobKey, QueueRegisterKey } from 'src/app/app.constants';
 import Redlock from 'redlock';
 import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
 import { UserProvisioningService } from './user-provisioning.service';
+import { CampaignIdentities } from 'src/campaign/strategy/campaign.strategy';
+import { batchLookupSharedUserIdentities } from './user.helper';
 import {
   SYNC_USERS_FAST_GRID_WINDOW_MINUTES,
   SYNC_USERS_WIDE_GRID_WINDOW_HOURS,
@@ -110,6 +112,29 @@ export class UserScheduler {
     return day + month;
   }
 
+  /**
+   * Buoc 5.6: identity cua ca lo sinh nhat trong MOT luot `lookupByIds` (client
+   * tu chia moi 200 id). `shared-user` khong tra loi thi ca lo coi nhu khong tra
+   * duoc - tra map rong de vong lap bo qua tung nguoi va ghi log, KHONG nem: lan
+   * chay nay khong chuc ai bang du lieu cu, va khong lam chet ca job.
+   */
+  private async lookupBirthdayIdentities(
+    users: User[],
+    context: string,
+  ): Promise<CampaignIdentities> {
+    try {
+      return await batchLookupSharedUserIdentities(
+        users.map((user) => user.sharedUserId),
+        this.sharedUserServiceClient,
+        this.logger,
+        context,
+      );
+    } catch {
+      // `batchLookupSharedUserIdentities` da log nguyen nhan (Failed to batch-lookup).
+      return new Map();
+    }
+  }
+
   @Cron(CronExpression.EVERY_DAY_AT_5PM)
   async BirthdayStrategyScheduler() {
     const context = `${UserScheduler.name}.${this.BirthdayStrategyScheduler.name}`;
@@ -168,7 +193,24 @@ export class UserScheduler {
       // user out into per-channel jobs (based on the reward type) that the
       // UserBirthdayConsumer processes independently and at the same time.
       const year = new Date().getFullYear();
+      // Buoc 5.6 (5.2(a), 5-d): MOT luot lookupByIds cho ca lo - ngon ngu
+      // thong bao + SDT / email / ho ten cua loi chuc deu lay tu day.
+      const identities = await this.lookupBirthdayIdentities(users, context);
+      let skipped = 0;
       for (const user of users) {
+        // Chinh sach loi: khong tra duoc nguoi nay => bo qua (khong cap
+        // thuong, khong chuc bang du lieu cu), ghi log, TIEP TUC LO.
+        const identity = user.sharedUserId
+          ? identities.get(user.sharedUserId)
+          : undefined;
+        if (!identity) {
+          skipped += 1;
+          this.logger.warn(
+            `User ${user.id} (${user.slug}) has no shared-user identity (sharedUserId=${user.sharedUserId ?? 'null'}), skip birthday`,
+            context,
+          );
+          continue;
+        }
         // Cấp phần thưởng cho mọi campaign USER_BIRTHDAY đang mở (voucher hoặc
         // gift) — tạo CampaignRecipient nếu chưa có — trước khi gửi lời chúc.
         // Thay cho luồng CampaignScheduler.handleBirthdayCampaigns (1AM) đã ẩn:
@@ -176,6 +218,7 @@ export class UserScheduler {
         await this.campaignService.triggerForUser(
           user,
           CampaignType.USER_BIRTHDAY,
+          identities,
         );
 
         for (const campaign of campaigns) {
@@ -205,12 +248,12 @@ export class UserScheduler {
             );
             continue;
           }
-          await this.userBirthdayProducer.enqueueUser(user, campaign);
+          await this.userBirthdayProducer.enqueueUser(user, campaign, identity);
         }
       }
 
       this.logger.log(
-        `Enqueued ${users.length} birthday greeting job(s)`,
+        `Enqueued ${users.length - skipped} birthday greeting job(s), skipped ${skipped} user(s) without shared-user identity`,
         context,
       );
     } catch (error) {
