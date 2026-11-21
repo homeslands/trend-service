@@ -3,7 +3,9 @@ type AccountRevenueClauseOptions = {
   hasEndDate: boolean;
   onlyNewCustomers: boolean;
   hasPaymentMethod: boolean;
-  hasPhonenumber: boolean;
+  // QD4 (buoc 7.2) - so `id` shared-user da khop o tim SDT (0 = khong loc).
+  // Moi id la mot `?` - ben goi day DUNG ngan ay id vao params, o cuoi.
+  sharedUserIdCount: number;
 };
 
 const accountRevenueFromWhereClause = (
@@ -72,9 +74,12 @@ const accountRevenueFromWhereClause = (
         : ''
     }
     ${
-      options.hasPhonenumber
+      // QD4 (buoc 7.2) - o tim SDT: loc theo danh sach id ma shared-user da
+      // khop chuoi con (`search-by-phonenumber`), khong `LIKE` tren cot SDT
+      // cuc bo nua (cot do bi drop o giai doan 8).
+      options.sharedUserIdCount > 0
         ? `AND
-        u.phonenumber_column LIKE ?`
+        u.shared_user_id_column IN (${new Array(options.sharedUserIdCount).fill('?').join(', ')})`
         : ''
     }
 `;

@@ -12,13 +12,9 @@ import { VoucherPaymentMethod } from 'src/voucher/entity/voucher-payment-method.
 import { VoucherProduct } from 'src/voucher-product/voucher-product.entity';
 import { Product } from 'src/product/product.entity';
 import { DataSource, In } from 'typeorm';
-import { SharedPointTransactionService } from 'src/shared/services/shared-point-transaction.service';
-import { CreatePointTransactionPayload } from 'src/shared/interfaces/commons/shared-point-transaction.interface';
-import {
-  PointTransactionObjectTypeEnum,
-  PointTransactionTypeEnum,
-} from 'src/gift-card-modules/point-transaction/entities/point-transaction.enum';
-import { SharedBalanceService } from 'src/shared/services/shared-balance.service';
+import { PointTransactionObjectTypeEnum } from 'src/gift-card-modules/point-transaction/entities/point-transaction.enum';
+import { campaignIdempotencyKey } from 'src/shared/constants/service-ref.constant';
+import { assertUserKeyLoaded } from 'src/user/user.constant';
 import { CampaignRecipient } from '../../entity/campaign-recipient.entity';
 import { Campaign } from '../../entity/campaign.entity';
 import { CoinCampaignTemplate } from '../../entity/coin-campaign-template.entity';
@@ -45,8 +41,6 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(WINSTON_MODULE_NEST_PROVIDER) private readonly logger: Logger,
-    private readonly sharedPointTransactionService: SharedPointTransactionService,
-    private readonly sharedBalanceService: SharedBalanceService,
     private readonly notificationService: NotificationService,
     private readonly notificationLanguageService: NotificationLanguageService,
     private readonly sharedUserServiceClient: SharedUserServiceClient,
@@ -327,35 +321,25 @@ export class NewUserCampaignStrategy implements ICampaignStrategy {
     // order as the gift-card redeem flow).
     // MOT nguon khoa cho ca ba lenh duoi day (buoc 2.12/2.13 — 2C): lay tu
     // ban ghi `user` da tra san o tren, khong tra lai va khong doc cot slug.
-    const sharedUserId = user.sharedUserId;
+    const sharedUserId = assertUserKeyLoaded(user.sharedUserId, context);
 
-    // Buoc 5.7 - CHUA XONG PHAN VI: ba lenh duoi day VAN ghi bang cuc bo cua
-    // trend. Doi dich o 7.4(b): cong vao vi o shared-user (kem
-    // campaignIdempotencyKey), bo luot doc-sau-cong, so xu do vi ghi. Dung coi
-    // campaign la "da don xong vi" sau giai doan 5.
-    // 7.4(b): doi dich - lenh cong xu IN.
-    await this.sharedBalanceService.calcBalance({
-      sharedUserId,
+    // Buoc 7.7b (trend-api.md 7.4(b)): cong xu vao vi shared-user - MOT lenh
+    // mang ca dong so cai (objectType/objectId/objectSlug/desc) va tra so du
+    // sau khi cong: khong con luot doc-sau-cong, khong con lenh tao dong
+    // `point_transaction` rieng. Khoa campaignIdempotencyKey(<slug campaign>,
+    // <sharedUserId>): mot campaign tang mot lan cho mot nguoi.
+    // Hong (503 sau khi goi lai + lookup-transaction) => hang `recipient` o
+    // buoc 1 da ghi ma xu chua cong: log loi kem khoa o client de doi soat
+    // (Z-8) cong bu cung khoa - cong bu khong bao gio thanh hai lan.
+    await this.sharedUserServiceClient.creditBalance({
+      userId: sharedUserId,
       points: grantedCoin,
-      type: PointTransactionTypeEnum.IN,
-    });
-
-    // 7.4(b): bo - luot doc-sau-cong (vi tra so du sau khi cong).
-    const currentBalance = await this.sharedBalanceService.findOneByField({
-      sharedUserId,
-      slug: null,
-    });
-
-    // 7.4(b): doi dich - so xu `objectType=CAMPAIGN` (vi ghi so).
-    await this.sharedPointTransactionService.create({
-      type: PointTransactionTypeEnum.IN,
-      desc: `Tặng ${grantedCoin.toLocaleString()} xu chào mừng thành viên mới từ chiến dịch ${campaign.name}`,
+      transactionId: campaignIdempotencyKey(campaign.slug, sharedUserId),
       objectType: PointTransactionObjectTypeEnum.CAMPAIGN,
+      objectId: campaign.id,
       objectSlug: campaign.slug,
-      points: grantedCoin,
-      sharedUserId,
-      balance: currentBalance.points,
-    } satisfies CreatePointTransactionPayload);
+      desc: `Tặng ${grantedCoin.toLocaleString()} xu chào mừng thành viên mới từ chiến dịch ${campaign.name}`,
+    });
 
     this.logger.log(
       `[NEW_USER][COIN] ${grantedCoin} coins credited to user ${user.id} via campaign ${campaign.slug}`,
