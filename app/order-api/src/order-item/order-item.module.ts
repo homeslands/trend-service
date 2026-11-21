@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { SharedUserServiceModule } from 'src/external-services/shared-user-service/shared-user-service.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { OrderItem } from './order-item.entity';
 import { OrderItemController } from './order-item.controller';
@@ -34,6 +35,8 @@ import { AccumulatedPointTransactionHistory } from 'src/accumulated-point/entiti
 
 @Module({
   imports: [
+    // Buoc 7.7d: AccumulatedPointService goi shared-user (diem tich luy).
+    SharedUserServiceModule,
     TypeOrmModule.forFeature([
       OrderItem,
       Order,

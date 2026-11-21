@@ -5,8 +5,6 @@ import {
   HttpStatus,
   Query,
   ValidationPipe,
-  Post,
-  Body,
   StreamableFile,
   Logger,
   Inject,
@@ -21,7 +19,6 @@ import {
 } from './dto/point-transaction-response.dto';
 import { AppPaginatedResponseDto, AppResponseDto } from 'src/app/app.dto';
 import { FindAllPointTransactionDto } from './dto/find-all-point-transaction.dto';
-import { CreatePointTransactionDto } from './dto/create-point-transaction.dto';
 import {
   ExportAllPointTransactionDto,
   ExportAllSystemPointTransactionDto,
@@ -30,7 +27,20 @@ import { ExportFilename } from 'src/shared/constants/export-filename.constant';
 import { GetAnalyzePointTransactionApi } from './point-transaction.swagger';
 import { RestController } from 'src/shared/decorators/rest-controller.decorator';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
+import { HasRoles } from 'src/role/roles.decorator';
+import { RoleEnum } from 'src/role/role.enum';
 
+// Buoc 7.7d (QD17): moi route "xem" o day la xem ho - doc giao dich xu
+// cua NGUOI KHAC (hoac toan he thong) o shared-user, sau khi service nay kiem
+// role. Khach tu xem lich su cua minh goi thang shared-user (7.8 doi client).
+// - xem mot khach (danh sach, mot giao dich): nhan vien;
+// - moi path co `analysis` / `export`: Manager, Admin, SuperAdmin.
+// Role viet TUONG MINH tung `RoleEnum.X` (ca kiem tinh doc chu trong
+// decorator).
+// Buoc 7.9: xoa `POST /` (route ghi client-facing tao thang mot dong giao
+// dich xu, khong kem lenh cong/tru co khoa - muc 1.8 cam; khong UI nao goi)
+// va `GET /:slug` (khong UI nao goi; bien nhan mot giao dich da co
+// `GET /:slug/export`). Khong dung lai o shared-user.
 @RestController({
   path: 'point-transaction',
   tags: ['Point Transaction Resources'],
@@ -43,6 +53,7 @@ export class PointTransactionController {
   ) {}
 
   @Get(':slug/export')
+  @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
   @ApiOperation({ summary: 'Export point transaction' })
   @HttpCode(HttpStatus.OK)
   async export(@Param('slug') slug: string): Promise<StreamableFile> {
@@ -57,6 +68,7 @@ export class PointTransactionController {
   }
 
   @Get('/export')
+  @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
   @ApiOperation({ summary: 'Export all point transaction by user' })
   @HttpCode(HttpStatus.OK)
   async exportAll(
@@ -74,6 +86,7 @@ export class PointTransactionController {
   }
 
   @Get('/export/system')
+  @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
   @ApiOperation({ summary: 'Export all system point transactions' })
   @HttpCode(HttpStatus.OK)
   async exportAllSystem(
@@ -89,26 +102,8 @@ export class PointTransactionController {
     });
   }
 
-  @Post()
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Create the point transaction' })
-  @ApiResponseWithType({
-    status: HttpStatus.OK,
-    type: PointTransactionResponseDto,
-  })
-  async create(
-    @Body(new ValidationPipe({ whitelist: true, transform: true }))
-    req: CreatePointTransactionDto,
-  ) {
-    const result = await this.pointTransactionService.create(req);
-    return {
-      statusCode: HttpStatus.OK,
-      timestamp: new Date().toISOString(),
-      result,
-    } as AppResponseDto<PointTransactionResponseDto>;
-  }
-
   @GetAnalyzePointTransactionApi({ path: 'analysis' })
+  @HasRoles(RoleEnum.Manager, RoleEnum.Admin, RoleEnum.SuperAdmin)
   async analyze(
     @Query(new ValidationPipe({ whitelist: true, transform: true }))
     req: FindAllPointTransactionDto,
@@ -128,6 +123,12 @@ export class PointTransactionController {
   }
 
   @Get()
+  @HasRoles(
+    RoleEnum.Staff,
+    RoleEnum.Manager,
+    RoleEnum.Admin,
+    RoleEnum.SuperAdmin,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Retrieve the point transactions' })
   @ApiResponseWithType({
@@ -149,21 +150,5 @@ export class PointTransactionController {
         statistics: PointTransactionStatisticItemDto[];
       }
     >;
-  }
-
-  @Get(':slug')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Retrieve the point transaction' })
-  @ApiResponseWithType({
-    status: HttpStatus.OK,
-    type: PointTransactionResponseDto,
-  })
-  async findOne(@Param('slug') slug: string) {
-    const result = await this.pointTransactionService.findOne(slug);
-    return {
-      statusCode: HttpStatus.OK,
-      timestamp: new Date().toISOString(),
-      result,
-    } as AppResponseDto<PointTransactionResponseDto>;
   }
 }

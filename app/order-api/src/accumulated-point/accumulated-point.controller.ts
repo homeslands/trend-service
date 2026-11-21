@@ -28,6 +28,8 @@ import { ApiResponseWithType } from 'src/app/app.decorator';
 
 import { CurrentUser } from 'src/user/user.decorator';
 import { CurrentUserDto } from 'src/user/user.dto';
+import { HasRoles } from 'src/role/roles.decorator';
+import { RoleEnum } from 'src/role/role.enum';
 
 @Controller('accumulated-point')
 @ApiTags('Accumulated Points')
@@ -37,7 +39,15 @@ export class AccumulatedPointController {
     private readonly accumulatedPointService: AccumulatedPointService,
   ) {}
 
+  // Buoc 7.7d (QD17): xem ho diem cua MOT khach - nhan vien,
+  // khong Customer (khach tu xem goi thang shared-user tu 7.8).
   @Get('user/:slug/points')
+  @HasRoles(
+    RoleEnum.Staff,
+    RoleEnum.Manager,
+    RoleEnum.Admin,
+    RoleEnum.SuperAdmin,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Get total points of user' })
   @ApiParam({
@@ -126,7 +136,15 @@ export class AccumulatedPointController {
     } as AppResponseDto<string>;
   }
 
+  // Buoc 7.7d (QD17): xem ho diem cua MOT khach - nhan vien,
+  // khong Customer (khach tu xem goi thang shared-user tu 7.8).
   @Get('user/:slug/history')
+  @HasRoles(
+    RoleEnum.Staff,
+    RoleEnum.Manager,
+    RoleEnum.Admin,
+    RoleEnum.SuperAdmin,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Get accumulated points history of user' })
   @ApiParam({
