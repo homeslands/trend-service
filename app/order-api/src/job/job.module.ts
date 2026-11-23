@@ -37,6 +37,7 @@ import { ACBConnectorConfig } from 'src/acb-connector/acb-connector.entity';
 import { CardOrder } from 'src/gift-card-modules/card-order/entities/card-order.entity';
 import { SharedModule } from 'src/shared/shared.module';
 import { AccumulatedPointModule } from 'src/accumulated-point/accumulated-point.module';
+import { DomainEventsModule } from 'src/domain-events/domain-events.module';
 import { Printer } from 'src/printer/entity/printer.entity';
 import { PrinterConnectorModule } from 'src/printer-connector/printer-connector.module';
 import { PrinterModule } from 'src/printer/printer.module';
@@ -73,6 +74,7 @@ import { SharedUserServiceModule } from 'src/external-services/shared-user-servi
     AccumulatedPointModule,
     PrinterConnectorModule,
     PrinterModule,
+    DomainEventsModule,
   ],
   controllers: [JobController],
   providers: [
