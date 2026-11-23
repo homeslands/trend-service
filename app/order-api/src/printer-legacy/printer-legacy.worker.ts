@@ -131,7 +131,7 @@ export class PrinterLegacyWorker implements OnModuleInit {
               error_column AS error,
               created_at_column AS createdAt,
               updated_at_column AS updatedAt
-            FROM order_db.printer_job_tbl
+            FROM printer_job_tbl
             WHERE status_column = 'pending'
             ORDER BY created_at_column ASC
             LIMIT 1
@@ -146,10 +146,12 @@ export class PrinterLegacyWorker implements OnModuleInit {
 
       printerJob = _.first(jobs);
 
+      // Buoc 8.11: cap nhat qua entity. Chuoi 'printer_job_tbl' (bo ten DB) bi TypeORM khop vao
+      // entity PrinterJob theo ten bang roi doi TEN THUOC TINH => EntityPropertyNotFoundError.
       await queryRunner.manager.update(
-        'order_db.printer_job_tbl',
-        { id_column: printerJob.id },
-        { status_column: PrinterJobStatus.PRINTING },
+        PrinterJob,
+        { id: printerJob.id },
+        { status: PrinterJobStatus.PRINTING },
       );
 
       await queryRunner.commitTransaction();
@@ -255,9 +257,9 @@ export class PrinterLegacyWorker implements OnModuleInit {
                   manager,
                 );
                 await manager.update(
-                  'order_db.printer_job_tbl',
-                  { id_column: printerJob.id },
-                  { status_column: PrinterJobStatus.PRINTED },
+                  PrinterJob,
+                  { id: printerJob.id },
+                  { status: PrinterJobStatus.PRINTED },
                 );
               },
               async () => {
@@ -434,9 +436,9 @@ export class PrinterLegacyWorker implements OnModuleInit {
                   manager,
                 );
                 await manager.update(
-                  'order_db.printer_job_tbl',
-                  { id_column: printerJob.id },
-                  { status_column: PrinterJobStatus.PRINTED },
+                  PrinterJob,
+                  { id: printerJob.id },
+                  { status: PrinterJobStatus.PRINTED },
                 );
               },
               async () => {
@@ -608,9 +610,9 @@ export class PrinterLegacyWorker implements OnModuleInit {
                   manager,
                 );
                 await manager.update(
-                  'order_db.printer_job_tbl',
-                  { id_column: printerJob.id },
-                  { status_column: PrinterJobStatus.PRINTED },
+                  PrinterJob,
+                  { id: printerJob.id },
+                  { status: PrinterJobStatus.PRINTED },
                 );
               },
               async () => {
