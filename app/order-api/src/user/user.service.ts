@@ -12,13 +12,12 @@ import {
   FindOptionsWhere,
   In,
   LessThanOrEqual,
-  Like,
   MoreThanOrEqual,
-  Raw,
   Repository,
 } from 'typeorm';
 import { User } from './user.entity';
 import { UserProvisioningService } from './user-provisioning.service';
+import { batchLookupSharedUserIdentities } from './user.helper';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QueueRegisterKey } from 'src/app/app.constants';
@@ -70,7 +69,6 @@ import { Branch } from 'src/branch/branch.entity';
 import { AuthException } from 'src/auth/auth.exception';
 import { AuthValidation } from 'src/auth/auth.validation';
 import { RoleEnum } from 'src/role/role.enum';
-import { SharedBalanceService } from 'src/shared/services/shared-balance.service';
 import { AuthProfileResponseDto } from 'src/auth/auth.dto';
 import {
   AccountRevenueCustomerType,
@@ -90,7 +88,6 @@ import { RevenueException } from 'src/revenue/revenue.exception';
 import { BranchUtils } from 'src/branch/branch.utils';
 import moment from 'moment';
 import ExcelJS from 'exceljs';
-import { TransactionManagerService } from 'src/db/transaction-manager.service';
 import { CampaignAction } from 'src/campaign/campaign.constants';
 import {
   SharedUserLookupResponse,
@@ -121,8 +118,6 @@ export class UserService {
     private readonly mapper: Mapper,
     @Inject(WINSTON_MODULE_NEST_PROVIDER)
     private readonly logger: Logger,
-    private readonly sharedBalanceService: SharedBalanceService,
-    private readonly transactionManagerService: TransactionManagerService,
     private readonly eventEmitter: EventEmitter2,
     private readonly branchUtils: BranchUtils,
     private readonly sharedUserServiceClient: SharedUserServiceClient,
@@ -134,10 +129,15 @@ export class UserService {
     private readonly distributeLockJobQueue: Queue,
   ) {}
 
-  private isTodayBirthday(dobDM: string): boolean {
+  // Buoc 8.3: so ngay sinh vua nhap (DD/MM/YYYY) voi hom nay - khong con cot
+  // `dobDM` cuc bo (ngay sinh thuoc shared-user).
+  private isTodayBirthday(dob: string | null | undefined): boolean {
+    const [day, month] = dob ? dob.split('/') : [];
+    if (!day || !month) return false;
     const today = new Date();
-    const todayDM = `${String(today.getDate()).padStart(2, '0')}${String(today.getMonth() + 1).padStart(2, '0')}`;
-    return dobDM === todayDM;
+    return (
+      Number(day) === today.getDate() && Number(month) === today.getMonth() + 1
+    );
   }
 
   // Ghep field identity moi nhat tu shared-user vao 1 UserResponseDto da map
@@ -156,6 +156,7 @@ export class UserService {
       dob?: string;
       email?: string;
       address?: string;
+      language?: string;
       isVerifiedEmail?: boolean;
       isVerifiedPhonenumber?: boolean;
       isActive?: boolean;
@@ -189,14 +190,20 @@ export class UserService {
     // day la them field vao ca 8, tuc doi shape ngoai chu dich (muc 1.4;
     // `response-shape.spec.ts` bat dung cho nay ngay 26/10/2026).
     // Noi gan: `getAllUsers`, canh `membershipCard`.
-    if (!identity) return dto;
+    //
+    // Buoc 8.3: identity CHI lay tu shared-user, khong rot ve `dto` (map tu
+    // cot cuc bo, doi ten o 8.9). Khong co identity / shared-user de trong =>
+    // de trong (fail-closed, muc 1.7), khong hien ban cuc bo co the da cu.
+    // `language` ghep o day tu buoc nay vi cot cuc bo thoi duoc ghi
+    // (`updateUserLanguage`) - key da co trong response, chi doi nguon.
     return Object.assign(dto, {
-      phonenumber: identity.phonenumber ?? dto.phonenumber,
-      firstName: identity.firstName ?? dto.firstName,
-      lastName: identity.lastName ?? dto.lastName,
-      dob: identity.dob ?? dto.dob,
-      email: identity.email ?? dto.email,
-      address: identity.address ?? dto.address,
+      phonenumber: identity?.phonenumber,
+      firstName: identity?.firstName,
+      lastName: identity?.lastName,
+      dob: identity?.dob,
+      email: identity?.email,
+      address: identity?.address,
+      language: identity?.language,
     });
   }
 
@@ -255,9 +262,8 @@ export class UserService {
   // address) gio thuoc ve shared-user (architect-http.md muc 1.1) - phai ghi
   // sang do TRUOC (fail-closed: shared-user tra loi thi moi luu cuc bo, tranh
   // 2 ban lech nhau vinh vien neu shared-user tu choi vd trung SDT o noi
-  // khac), ket qua tra ve ghep tu response cua chinh lan goi do. Van luu lai
-  // ban sao cuc bo (khong xoa) vi cac module khac (xuat Excel, campaign sinh
-  // nhat...) van doc truc tiep cot cuc bo - ngoai pham vi dot sua nay.
+  // khac), ket qua tra ve ghep tu response cua chinh lan goi do. Tu buoc 8.3
+  // KHONG con luu ban sao identity cuc bo: lenh luu cuc bo chi con `branch`.
   //
   // 2 lenh ghi (shared-user + cuc bo) phai la 1 don vi nguyen tu
   // (architect-http.md muc 1.2 - bat buoc): neu buoc luu cuc bo phia duoi
@@ -319,10 +325,10 @@ export class UserService {
       throw new AuthException(AuthValidation.USER_NOT_FOUND);
     }
 
-    Object.assign(user, {
-      ...requestData,
-    });
-
+    // Buoc 8.3: KHONG chep `requestData` xuong hang cuc bo nua - truoc day
+    // `Object.assign(user, { ...requestData })` ghi ca ho ten / ngay sinh /
+    // email / dia chi vao cot cuc bo (doi ten o 8.9). Hang cuc bo chi con
+    // `branch` (ben duoi); identity ghi sang shared-user (`updateIdentity`).
     if (requestData.branch) {
       const branch = await this.branchRepository.findOne({
         where: { slug: requestData.branch },
@@ -334,10 +340,8 @@ export class UserService {
       user.branch = branch;
     }
 
-    if ('dob' in requestData) {
-      const [day, month] = requestData.dob ? requestData.dob.split('/') : [];
-      user.dobDM = day && month ? `${day}${month}` : null;
-    }
+    // Buoc 8.3: KHONG con ghi `dobDM` cuc bo - ngay sinh chi o shared-user
+    // (`updateIdentity` ben duoi), producer sinh nhat o shared-user (8.1).
 
     let identity: Awaited<
       ReturnType<SharedUserServiceClient['updateIdentity']>
@@ -364,11 +368,7 @@ export class UserService {
     try {
       const updatedUser = await this.userRepository.save(user);
       this.logger.log(`User ${user.id} updated profile`, context);
-      if (
-        requestData.dob &&
-        updatedUser.dobDM &&
-        this.isTodayBirthday(updatedUser.dobDM)
-      )
+      if (requestData.dob && this.isTodayBirthday(requestData.dob))
         this.eventEmitter.emit(CampaignAction.USER_BIRTHDAY_TRIGGERED, {
           user: updatedUser,
         });
@@ -461,9 +461,6 @@ export class UserService {
         requirement.scope === UserRequirementScope.INITIAL,
     );
 
-    // Ket qua that su cua lenh ghi xa - nguon de chep xuong cot guong.
-    let updated: SharedUserLookupResponse | null = null;
-
     if (blockedPhonenumberRequirement) {
       // So voi SDT THAT ben shared-user (`identity`), KHONG so voi cot guong
       // cuc bo. Cot guong duoc phep cu (khach doi so o service khac, lop bu
@@ -478,30 +475,16 @@ export class UserService {
         );
         throw new AuthException(AuthValidation.NEED_UPDATE_PHONE_NUMBER);
       } else {
-        const existedPhonenumber = await this.userRepository.findOne({
-          where: {
-            phonenumber: requestData.phonenumber,
-          },
-        });
-        if (existedPhonenumber) {
-          this.logger.error(
-            AuthValidation.PHONE_NUMBER_ALREADY_EXISTS.message,
-            null,
-            context,
-          );
-          throw new AuthException(AuthValidation.PHONE_NUMBER_ALREADY_EXISTS);
-        }
         // Phonenumber la login key that su - thuoc ve shared-user
         // (architect-http.md muc 1.1). Ghi sang do TRUOC (fail-closed: neu
-        // shared-user tu choi - vd 409 vi da bi nguoi khac chiem giua luc
-        // check cuc bo va luc goi - thi khong duoc luu ban cuc bo, tranh 2
-        // ben lech nhau). Check cuc bo o tren chi la fast-fail, khong phai
-        // nguon that.
+        // shared-user tu choi thi khong duoc luu ban cuc bo, tranh 2 ben lech
+        // nhau). Buoc 8.3: bo phep tra trung "fast-fail" tren cot SDT cuc bo
+        // (doi ten o 8.9) - shared-user la noi duy nhat biet so da co chu
+        // chua, tra 409 => PHONE_NUMBER_ALREADY_EXISTS.
         try {
-          updated = await this.sharedUserServiceClient.updateIdentity(
-            user.sharedUserId,
-            { phonenumber: requestData.phonenumber },
-          );
+          await this.sharedUserServiceClient.updateIdentity(user.sharedUserId, {
+            phonenumber: requestData.phonenumber,
+          });
         } catch (error) {
           this.logger.error(
             `Error updating phonenumber on shared-user: ${error.message}`,
@@ -515,11 +498,6 @@ export class UserService {
             AuthValidation.ERROR_COMPLETE_USER_REGISTRATION,
           );
         }
-        // Ghi guong theo RESPONSE, khong theo `requestData`: chep dung cai
-        // shared-user DA LUU, khong phai cai minh XIN luu.
-        Object.assign(user, {
-          phonenumber: updated.phonenumber,
-        });
         // KHONG danh dau requirement o day nua (QD22, buoc 2.5):
         // `update-identity` cua shared-user tu chuyen
         // NEED_UPDATE_PHONE_NUMBER sang COMPLETED khi SDT doi - cung mot
@@ -556,66 +534,24 @@ export class UserService {
     // day la viec can quyet dinh rieng, khong phai sua tien tay o day. Xem
     // progress/trend-api.md muc "Bo sung (2026-09-04)".
 
-    // Ghi guong. Hong thi KHONG bu tru lui (doi tu buoc 2.5).
-    await this.transactionManagerService.execute<void>(
-      async (manager) => {
-        // Chi con hang `user` cuc bo (cot `phonenumber` con song toi GD8).
-        // Requirement da do shared-user tu dong trong `update-identity`.
-        await manager.save(user);
-      },
-      () => {
-        this.logger.log(
-          `User ${user.slug} registration has been completed`,
-          context,
-        );
-      },
-      (error) => {
-        // KHONG nem - ca chu dich, khong phai bo sot.
-        // `TransactionManagerService.execute` da rollback truoc khi goi callback
-        // nay va CHI nem tiep neu callback nem. Khong nem nghia la: guong khong
-        // ghi duoc, nhung request van THANH CONG (204).
-        //
-        // Vi sao khong bu tru ve shared-user:
-        // - Lenh ghi duy nhat o day la cot `phonenumber_column` cuc bo - mot
-        //   GUONG cua shared-user, song toi GD8 (doi ten 8.9, drop 10.3). Su
-        //   that DA ghi dung: khach that su da doi SDT, va requirement da
-        //   COMPLETED trong cung transaction do ben shared-user.
-        // - SAI huong: huy mot lenh ghi da thanh cong vao nguon su that chi vi
-        //   cap nhat guong hong;
-        // - KHONG DU: `update-identity` con mot hieu ung phu la dat requirement
-        //   ve COMPLETED, ma lenh bu tru (chi ghi lai phonenumber) khong mo lai
-        //   duoc - bu tru xong van lech;
-        // - DAP LEN NGUOI KHAC: giua luc ta ghi va luc ta bu tru, mot luot khac
-        //   co the da doi SDT sang gia tri thu ba; ghi de "gia tri cu" len do la
-        //   lost update tren chinh du lieu dang nhap.
-        //
-        // ⚠ GUONG KHONG TU SUA. Do lai 31/10/2026:
-        // `UserProvisioningService.provisionLocalUser` thoat som khi hang da ton
-        // tai (`if (existed) return`), nen lop 1 (sync-on-read) va lop 3 (cron)
-        // cua QD19 CHI TAO hang thieu, KHONG cap nhat hang cu. Khong co lop nao
-        // keo cot nay ve - no lech cho toi khi GD8 drop cot.
-        //
-        // Hau qua thuc te, chi MOT cho: TIM KHACH THEO SDT
-        // (`GET /user?phonenumber=` loc `Like` tren cot guong) se khong ra nguoi
-        // nay khi tra bang so MOI. Lop 1b cua QD19 phat hien duoc ca nay nhung
-        // co y khong sua ("Local phonenumber ... is stale, lookup-on-miss cannot
-        // surface it").
-        // Moi cho khac KHONG anh huong: response nao cung ghep identity tu
-        // shared-user (`mergeSharedUserIdentity`) nen so hien ra luon dung.
-        this.logger.error(
-          `[MIRROR-LAG] local phonenumber mirror NOT written for ${user.slug} (shared-user already stored ${updated?.phonenumber}); local phone search will miss this customer until stage 8: ${error?.message}`,
-          error?.stack,
-          context,
-        );
-      },
+    // Buoc 8.8: HET ghi guong. Truoc day cho nay luu hang `user` cuc bo de chep
+    // SDT moi xuong `phonenumber_column` (NOT NULL + UNIQUE, lech la vap UNIQUE
+    // khi nguoi sau dang ky bang so cu - nhat ky `[MIRROR-LAG]`). Cot da roi
+    // entity, doi ten `_deprecated_*` o 8.9: SDT chi con o shared-user, va
+    // `update-identity` o tren da ghi + dong requirement trong cung mot
+    // transaction ben do. Khong con gi de ghi o trend.
+    this.logger.log(
+      `User ${user.slug} registration has been completed`,
+      context,
     );
   }
 
   // Tao user moi: trend quyet dinh role/branch (nghiep vu cua no), sau do
   // goi noi bo sang shared-user de luu lai identity (phonenumber, mat khau,
   // ho ten...) - dao nguoc thu tu so voi truoc khi tach (khi do trend tu
-  // luu het). Validate role/branch/trung SDT truoc khi goi sang shared-user
-  // de khong tao "rac" ben do neu request sai ngay tu dau.
+  // luu het). Validate role/branch truoc khi goi sang shared-user de khong
+  // tao "rac" ben do neu request sai ngay tu dau; trung SDT do shared-user
+  // bao (buoc 8.3).
   async createUser(requestData: CreateUserRequestDto) {
     const context = `${UserService.name}.${this.createUser.name}`;
 
@@ -632,13 +568,9 @@ export class UserService {
       if (!branch) throw new BranchException(BranchValidation.BRANCH_NOT_FOUND);
     }
 
-    const existingLocalUser = await this.userRepository.findOne({
-      where: { phonenumber: requestData.phonenumber },
-    });
-    if (existingLocalUser) {
-      throw new AuthException(AuthValidation.USER_EXISTS);
-    }
-
+    // Buoc 8.3: KHONG tra trung SDT tren cot cuc bo nua (doi ten o 8.9; ban
+    // guong co the cu). shared-user tu bao trung khi tao (400 `USER_EXISTS`
+    // / 409) => `USER_EXISTS` o nhanh catch ben duoi - mot nguon su that.
     let sharedUser: Awaited<ReturnType<SharedUserServiceClient['createUser']>>;
     try {
       sharedUser = await this.sharedUserServiceClient.createUser({
@@ -692,7 +624,7 @@ export class UserService {
     const user =
       existedLocalUser ??
       this.userRepository.create({
-        phonenumber: sharedUser.phonenumber,
+        // Buoc 8.8: khong chep SDT xuong nua - cot da roi entity.
         sharedUserId: sharedUser.id,
       });
     // Y dinh cua lenh tao thang ban role mac dinh ma lop khac vua gan.
@@ -1027,20 +959,12 @@ export class UserService {
       if (!this.userProvisioningService.isProvisionable(sharedUser.ownerService))
         return false;
 
-      const local =
-        await this.userProvisioningService.ensureLocalUser(sharedUser);
+      await this.userProvisioningService.ensureLocalUser(sharedUser);
 
-      // Hang cuc bo DA CO tu truoc nhung SDT cuc bo khac SDT that (khach doi
-      // so ben shared-user) => truy van lai van rong. Khong tu sua o day (day
-      // la duong doc), chi keu len de con dieu tra.
-      if (local.phonenumber !== sharedUser.phonenumber) {
-        this.logger.warn(
-          `Local phonenumber of sharedUserId=${sharedUser.id} is stale, lookup-on-miss cannot surface it`,
-          context,
-        );
-        return false;
-      }
-
+      // Buoc 8.3: bo phep so SDT cua hang cuc bo voi SDT that. Tu 8.2 bo loc
+      // SDT cua `GET /user` hoi shared-user (`search-by-phonenumber`) roi loc
+      // theo `sharedUserId`, nen guong SDT cuc bo cu khong con lam truy van
+      // lai ra rong - va cot do doi ten o 8.9.
       this.logger.log(
         `Lookup-on-miss ensured local user for sharedUserId=${sharedUser.id}`,
         context,
@@ -1249,6 +1173,66 @@ export class UserService {
     ];
   }
 
+  /**
+   * Buoc 8.1 (QD13) - route POST /user/birthday/trigger. Scheduler sinh nhat
+   * nay o shared-user: route chi kich producer ben do chay mot luot (day job
+   * `user-birthday-triggered` vao queue cua trend); cap thuong va gui loi
+   * chuc do `UserBirthdayConsumer` lam sau, bat dong bo. shared-user khong tra
+   * loi => 503 (`toReadError`).
+   * @returns cau bao cho nguoi bam nut.
+   */
+  async triggerBirthdayProducer(): Promise<string> {
+    const context = `${UserService.name}.${this.triggerBirthdayProducer.name}`;
+    const run = await this.sharedUserServiceClient.triggerBirthdayProducer();
+    if (!run?.enabled) {
+      this.logger.warn(
+        `Birthday producer of shared-user is off (USER_BIRTHDAY_QUEUE_PREFIX not set), nothing enqueued`,
+        context,
+      );
+      return 'Birthday producer of shared-user is off, nothing was enqueued';
+    }
+    this.logger.log(
+      `Birthday producer of shared-user ran: ${run.enqueued ?? 0}/${run.users ?? 0} job(s) for ${run.birthdayDM}${run.failed ? ' (failed part way)' : ''}`,
+      context,
+    );
+    if (run.failed) {
+      // Thuong gap nhat: mot luot khac (cron 17h hoac lan bam truoc trong 2
+      // phut) con giu khoa Redlock ben shared-user.
+      return `Birthday producer of shared-user did not finish (another run may hold its lock, try again in a few minutes): ${run.enqueued ?? 0} user(s) enqueued`;
+    }
+    return `Birthday producer has been triggered: ${run.enqueued ?? 0} user(s) enqueued`;
+  }
+
+  /**
+   * Buoc 8.2 - bo loc identity cua danh sach user (SDT chuoi con, khoang ngay
+   * sinh) loc TRUOC o shared-user: tra mang `sharedUserId` de ben goi loc
+   * `sharedUserId IN (...)`. Cot SDT / ngay sinh cuc bo bi doi ten o 8.9, va loc
+   * truoc (khong loc sau khi ghep) giu phan trang o DB dung.
+   * - `null` = khong co bo loc identity nao; co ca hai => giao hai mang.
+   * - Vuot tran => 400 (137007 / 137008, "tim hep lai", khong cat bot);
+   *   shared-user khong tra loi => 503 (fail-closed: day la bo loc chinh cua
+   *   response, roi ve cot cuc bo la sai lech D9). Cung khuon QD4 cua 7.1.
+   */
+  private async searchSharedUserIdsForFilter(filter: {
+    phonenumber?: string;
+    dob?: { type: DobFilterType; from?: string; to?: string };
+  }): Promise<string[] | null> {
+    const fragment = filter.phonenumber?.trim();
+    const dob = filter.dob?.from || filter.dob?.to ? filter.dob : undefined;
+    if (!fragment && !dob) return null;
+    const byPhonenumber = fragment
+      ? await this.sharedUserServiceClient.searchIdsByPhonenumber(fragment)
+      : null;
+    const byBirthday = dob
+      ? await this.sharedUserServiceClient.searchIdsByBirthday(dob)
+      : null;
+    if (byPhonenumber && byBirthday) {
+      const inRange = new Set(byBirthday);
+      return byPhonenumber.filter((id) => inRange.has(id));
+    }
+    return byPhonenumber ?? byBirthday;
+  }
+
   async getAllUsers(
     query: GetAllUserQueryRequestDto,
   ): Promise<AppPaginatedResponseDto<UserResponseDto>> {
@@ -1263,8 +1247,6 @@ export class UserService {
     const whereOptions: FindOptionsWhere<User> = {};
     if (query.slug) whereOptions.slug = query.slug;
     if (query.branch) whereOptions.branch = { slug: query.branch };
-    if (query.phonenumber)
-      whereOptions.phonenumber = Like(`%${query.phonenumber}%`);
     if (!_.isEmpty(query.role))
       whereOptions.role = {
         name: In(query.role),
@@ -1300,33 +1282,23 @@ export class UserService {
       whereOptions.createdAt = LessThanOrEqual(new Date(query.endDate));
     }
 
-    if (query.birthdayFromDate || query.birthdayToDate) {
-      // dobDM is stored as ddmm; reorder to mmdd for correct chronological comparison
-      const toMMDD = (ddmm: string) => {
-        const [day, month] = ddmm.split('/');
-        return `${month}${day}`;
-      };
-      const fromMMDD = query.birthdayFromDate
-        ? toMMDD(query.birthdayFromDate)
-        : '0101';
-      const toMMDDValue = query.birthdayToDate
-        ? toMMDD(query.birthdayToDate)
-        : '1231';
-      const reorderedExpr = (alias: string) =>
-        `CONCAT(SUBSTRING(${alias}, 3, 2), SUBSTRING(${alias}, 1, 2))`;
-
-      whereOptions.dobDM =
-        fromMMDD <= toMMDDValue
-          ? Raw(
-              (alias) =>
-                `${alias} IS NOT NULL AND ${reorderedExpr(alias)} BETWEEN :fromMMDD AND :toMMDD`,
-              { fromMMDD, toMMDD: toMMDDValue },
-            )
-          : Raw(
-              (alias) =>
-                `${alias} IS NOT NULL AND (${reorderedExpr(alias)} >= :fromMMDD OR ${reorderedExpr(alias)} <= :toMMDD)`,
-              { fromMMDD, toMMDD: toMMDDValue },
-            );
+    // Buoc 8.2 - SDT (chuoi con) va khoang sinh nhat (DD/MM, bo nam) loc truoc o
+    // shared-user (`searchSharedUserIdsForFilter`) thay cho `Like` / `dobDM` tren
+    // cot cuc bo. Khong ai khop => `In([])` = 0 dong (TypeORM sinh `0=1`).
+    // Loc theo the (o tren) da chot mot nguoi => giao voi mang nay.
+    const identityIds = await this.searchSharedUserIdsForFilter({
+      phonenumber: query.phonenumber,
+      dob: {
+        type: DobFilterType.DAY_MONTH,
+        from: query.birthdayFromDate,
+        to: query.birthdayToDate,
+      },
+    });
+    if (identityIds !== null) {
+      const cardOwner = whereOptions.sharedUserId as string | undefined;
+      whereOptions.sharedUserId = In(
+        cardOwner ? identityIds.filter((id) => id === cardOwner) : identityIds,
+      );
     }
 
     // Construct find many options
@@ -1334,8 +1306,6 @@ export class UserService {
       relations: {
         branch: true,
         role: true,
-        accumulatedPoint: true,
-        balance: true,
       },
       where: whereOptions,
       order: { createdAt: 'DESC' },
@@ -1430,57 +1400,6 @@ export class UserService {
   }
 
   /**
-   * Parse a date-of-birth range bound into a comparable numeric key according to
-   * the granularity (`day` | `month` | `day_month`). The year is always ignored.
-   * - day: `5` / `05` -> 5
-   * - month: `6` / `06` -> 6
-   * - day_month: `01/06` (DD/MM) -> 601 (month * 100 + day)
-   */
-  private parseDobBound(value: string, type: DobFilterType): number {
-    if (type === DobFilterType.DAY_MONTH) {
-      const match = value.match(/^(\d{1,2})\/(\d{1,2})$/);
-      if (!match)
-        throw new BadRequestException(
-          `Invalid date of birth bound "${value}". Expected DD/MM`,
-        );
-      const day = parseInt(match[1], 10);
-      const month = parseInt(match[2], 10);
-      if (day < 1 || day > 31 || month < 1 || month > 12)
-        throw new BadRequestException(
-          `Invalid date of birth bound "${value}". Day must be 1-31, month 1-12`,
-        );
-      return month * 100 + day;
-    }
-
-    if (!/^\d{1,2}$/.test(value))
-      throw new BadRequestException(
-        `Invalid date of birth bound "${value}". Expected a number`,
-      );
-    const num = parseInt(value, 10);
-    const max = type === DobFilterType.MONTH ? 12 : 31;
-    if (num < 1 || num > max)
-      throw new BadRequestException(
-        `Invalid date of birth bound "${value}". Must be 1-${max}`,
-      );
-    return num;
-  }
-
-  /**
-   * Build a comparable numeric key from a user's `dob` (DD/MM/YYYY string),
-   * matching the granularity used by {@link parseDobBound}. Returns null when
-   * the dob is missing or invalid.
-   */
-  private dobToKey(dob: string, type: DobFilterType): number | null {
-    const parsed = moment(dob, 'DD/MM/YYYY', true);
-    if (!parsed.isValid()) return null;
-    const day = parsed.date();
-    const month = parsed.month() + 1;
-    if (type === DobFilterType.DAY) return day;
-    if (type === DobFilterType.MONTH) return month;
-    return month * 100 + day;
-  }
-
-  /**
    * Export users to an Excel file containing name, phone number and date of birth.
    * Supports filtering by branch, phone number and a date of birth range that
    * matches by day, month or day+month (the year is ignored).
@@ -1491,69 +1410,47 @@ export class UserService {
     const context = `${UserService.name}.${this.exportUsersToExcel.name}`;
 
     const whereOptions: FindOptionsWhere<User> = {};
-    if (query.phonenumber)
-      whereOptions.phonenumber = Like(`%${query.phonenumber}%`);
-
     if (!_.isEmpty(query.role))
       whereOptions.role = {
         name: In(query.role),
       };
 
-    let users = await this.userRepository.find({
+    // Buoc 8.2 - SDT va khoang ngay sinh (theo ngay / thang / ngay+thang, bo
+    // nam) loc truoc o shared-user, thay cho `Like` tren cot SDT va loc trong
+    // bo nho tren `user.dob` cuc bo (doi ten o 8.9 => file rong im lang).
+    const identityIds = await this.searchSharedUserIdsForFilter({
+      phonenumber: query.phonenumber,
+      dob: {
+        type: query.dobFilterType ?? DobFilterType.DAY_MONTH,
+        from: query.dobStartDate,
+        to: query.dobEndDate,
+      },
+    });
+    if (identityIds !== null) whereOptions.sharedUserId = In(identityIds);
+
+    const users = await this.userRepository.find({
       relations: { branch: true, role: true },
       where: whereOptions,
       order: { createdAt: 'DESC' },
     });
 
-    // Filter by date of birth range (dob stored as DD/MM/YYYY; year ignored)
-    if (query.dobStartDate || query.dobEndDate) {
-      const type = query.dobFilterType ?? DobFilterType.DAY_MONTH;
-      const start = query.dobStartDate
-        ? this.parseDobBound(query.dobStartDate, type)
-        : null;
-      const end = query.dobEndDate
-        ? this.parseDobBound(query.dobEndDate, type)
-        : null;
-
-      users = users.filter((user) => {
-        if (!user.dob) return false;
-        const key = this.dobToKey(user.dob, type);
-        if (key === null) return false;
-        if (start !== null && end !== null) {
-          // Support wrap-around ranges (e.g. 25/12 -> 05/01)
-          return start <= end
-            ? key >= start && key <= end
-            : key >= start || key <= end;
-        }
-        if (start !== null) return key >= start;
-        if (end !== null) return key <= end;
-        return true;
-      });
-    }
-
     // Ghep identity moi nhat tu shared-user - danh sach dung de xuat file
     // cho nguoi dung xem/luu lai, khong the de ten/SDT/ngay sinh la ban cuc
     // bo co the cu (architect-http.md muc 1.1 quy tac 4, cung pattern
-    // getAllUsers). 1 lan goi batch, khong goi rieng tung dong. Fail-open:
-    // loi mang chi log warning, xuat file bang du lieu cuc bo thay vi lam
-    // hong ca request.
+    // getAllUsers). 1 lan goi batch, khong goi rieng tung dong.
+    // Buoc 8.3: FAIL-CLOSED (truoc la fail-open, rot ve cot cuc bo) - cot
+    // identity cuc bo doi ten o 8.9, khong con gi de rot ve; shared-user
+    // khong tra loi => 503, khong xuat mot file ten/SDT trong.
     const identityById = new Map<
       string,
       Awaited<ReturnType<SharedUserServiceClient['lookupByIds']>>[number]
     >();
-    try {
-      const sharedUserIds = users
-        .map((user) => user.sharedUserId)
-        .filter(Boolean);
-      const identities =
-        await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
-      identities.forEach((identity) => identityById.set(identity.id, identity));
-    } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich export identity from shared-user, falling back to local cache: ${error?.message}`,
-        context,
-      );
-    }
+    const sharedUserIds = users
+      .map((user) => user.sharedUserId)
+      .filter(Boolean);
+    const identities =
+      await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
+    identities.forEach((identity) => identityById.set(identity.id, identity));
 
     // Build workbook
     const workbook = new ExcelJS.Workbook();
@@ -1569,14 +1466,15 @@ export class UserService {
 
     users.forEach((user, index) => {
       const identity = identityById.get(user.sharedUserId);
-      const firstName = identity?.firstName ?? user.firstName;
-      const lastName = identity?.lastName ?? user.lastName;
-      const name = [firstName, lastName].filter(Boolean).join(' ').trim();
+      const name = [identity?.firstName, identity?.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
       worksheet.addRow({
         index: index + 1,
         name: name || 'N/A',
-        phonenumber: identity?.phonenumber ?? user.phonenumber ?? 'N/A',
-        dob: identity?.dob ?? user.dob ?? 'N/A',
+        phonenumber: identity?.phonenumber ?? 'N/A',
+        dob: identity?.dob ?? 'N/A',
         role: user.role.name || 'N/A',
       });
     });
@@ -1741,36 +1639,29 @@ export class UserService {
           ),
         ]);
 
-    // Ghep ten khach hang moi nhat tu shared-user - customerName tu raw SQL
-    // la ban cuc bo co the cu (architect-http.md muc 1.1 quy tac 4, cung
-    // pattern getAllUsers/exportUsersToExcel). 1 lan goi batch. Fail-open:
-    // loi mang chi log warning, dung ban cuc bo thay vi lam hong ca request.
+    // Ten khach chi con o shared-user (buoc 8.2: SQL tho khong con
+    // `CONCAT(first_name, last_name)` cuc bo - cot do doi ten o 8.9 => 500).
+    // MOT luot batch; shared-user khong tra loi => 503 (fail-closed, nhu bo loc
+    // SDT phia tren - khong con ten cuc bo de roi ve).
+    const identities = await batchLookupSharedUserIdentities(
+      results.map((item) => item.customerSharedUserId),
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
     const customerNameById = new Map<string, string>();
-    try {
-      const sharedUserIds = results
-        .map((item) => item.customerSharedUserId)
-        .filter(Boolean);
-      const identities =
-        await this.sharedUserServiceClient.lookupByIds(sharedUserIds);
-      identities.forEach((identity) => {
-        const name = [identity.firstName, identity.lastName]
-          .filter(Boolean)
-          .join(' ')
-          .trim();
-        if (name) customerNameById.set(identity.id, name);
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Failed to batch-enrich account revenue customer name from shared-user, falling back to local cache: ${error?.message}`,
-        context,
-      );
-    }
+    identities.forEach((identity) => {
+      const name = [identity.firstName, identity.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (name) customerNameById.set(identity.id, name);
+    });
 
     const customers: AccountRevenueCustomerResponseDto[] = results.map(
       (item) => ({
         customerSlug: item.customerSlug,
-        customerName:
-          customerNameById.get(item.customerSharedUserId) || item.customerName,
+        customerName: customerNameById.get(item.customerSharedUserId) ?? '',
         customerRegisteredAt: moment(item.customerRegisteredAt).toDate(),
         totalAmount: Number(item.totalAmount),
         totalAmountPoint: Number(item.totalAmountPoint),
@@ -1852,15 +1743,12 @@ export class UserService {
       throw new UserException(UserValidation.USER_NOT_FOUND);
     }
 
-    // `language` la mot field IDENTITY (architect-http.md muc 1.6) - truoc
-    // day route nay chi ghi cot cuc bo, nen ban `language` ben shared-user
-    // khong bao gio duoc cap nhat va 2 ben lech im lang. Nay ghi xuyen 2
-    // service theo dung muc 1.2: shared-user truoc, cuc bo sau, rollback
-    // neu buoc sau hong.
-    //
-    // Van GIU ban cuc bo (dual-write) vi ~15 cho trong trend (notification,
-    // campaign sinh nhat) con doc `user.language` truc tiep - go cac cho do
-    // thuoc giai doan 5, xem bang chan o progress/trend-api.md giai doan 2.
+    // `language` la mot field IDENTITY (architect-http.md muc 1.6), chi ghi o
+    // shared-user. Buoc 8.3: bo nua ghi cuc bo (dual-write tu giai doan 1) -
+    // cot doi ten o 8.9, va khong con cho nao trong trend doc `user.language`
+    // cuc bo (thong bao / sinh nhat doc `language` cua shared-user tu giai
+    // doan 4-5). Chi con mot lenh ghi nen khong con nhanh bu tru.
+    // Khong co identity => 404 (khong tao identity o day).
     const beforeIdentity = await this.sharedUserServiceClient.lookupById(
       user.sharedUserId,
     );
@@ -1878,26 +1766,6 @@ export class UserService {
       { language: requestData.language },
     );
 
-    user.language = requestData.language;
-    try {
-      await this.userRepository.save(user);
-    } catch (error) {
-      this.logger.error(
-        `Error when saving local language: ${error.message}`,
-        error.stack,
-        context,
-      );
-      await this.rollbackSharedUserIdentity(
-        user.sharedUserId,
-        { language: beforeIdentity.language },
-        { language: requestData.language },
-        context,
-      );
-      // Cung ma loi ma updateUser dung khi luu cuc bo that bai - khong dat
-      // them ma moi cho mot nhanh loi cung loai.
-      throw new AuthException(AuthValidation.ERROR_UPDATE_USER);
-    }
-
     this.logger.log(`User ${user.slug} language has been updated`, context);
 
     // Ghep identity moi nhat tu shared-user vao response - cung pattern
@@ -1907,17 +1775,19 @@ export class UserService {
     // khong them khong bot (muc 1.4).
     const dto = this.mapper.map(user, User, AuthProfileResponseDto);
     Object.assign(dto, {
-      phonenumber: identity.phonenumber ?? dto.phonenumber,
-      firstName: identity.firstName ?? dto.firstName,
-      lastName: identity.lastName ?? dto.lastName,
-      dob: identity.dob ?? dto.dob,
-      email: identity.email ?? dto.email,
-      address: identity.address ?? dto.address,
-      image: identity.image ?? dto.image,
+      // Buoc 8.3: chi lay tu shared-user - khong rot ve cot cuc bo (doi ten o
+      // 8.9); shared-user khong co gia tri thi de trong (fail-closed, muc 1.7).
+      phonenumber: identity.phonenumber,
+      firstName: identity.firstName,
+      lastName: identity.lastName,
+      dob: identity.dob,
+      email: identity.email,
+      address: identity.address,
+      image: identity.image,
       // Buoc 4.7: entity khong con hai co nen khong rot ve `dto` (undefined).
       isVerifiedEmail: identity.isVerifiedEmail ?? false,
       isVerifiedPhonenumber: identity.isVerifiedPhonenumber ?? false,
-      language: identity.language ?? dto.language,
+      language: identity.language,
     });
     return dto;
   }

@@ -35,7 +35,14 @@ import {
   BirthdayJobData,
   SEND_BIRTHDAY_EMAIL_JOB,
   SEND_BIRTHDAY_MULTI_CHANNEL_JOB,
+  USER_BIRTHDAY_TRIGGERED_JOB,
+  UserBirthdayTriggeredJobData,
 } from './user-birthday.constants';
+import { CampaignType } from 'src/campaign/campaign.constants';
+import { SharedUserServiceClient } from 'src/external-services/shared-user-service/shared-user-service.client';
+import { User } from './user.entity';
+import { UserBirthdayProducer } from './user-birthday.producer';
+import { batchLookupSharedUserIdentities } from './user.helper';
 
 @Processor(QueueRegisterKey.USER_BIRTHDAY, { concurrency: 20 })
 @Injectable()
@@ -55,6 +62,10 @@ export class UserBirthdayConsumer extends WorkerHost {
     private readonly zaloOaConnectorClient: ZaloOaConnectorClient,
     private readonly campaignService: CampaignService,
     private readonly systemConfigService: SystemConfigService,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+    private readonly sharedUserServiceClient: SharedUserServiceClient,
+    private readonly userBirthdayProducer: UserBirthdayProducer,
   ) {
     super();
     this.zaloOaApiKey = this.configService.get<string>('ZALO_OA_API_KEY');
@@ -68,29 +79,137 @@ export class UserBirthdayConsumer extends WorkerHost {
    * independently and at the same time.
    * @returns the channel that accepted the greeting, or null if it did not.
    */
-  async process(job: Job<BirthdayJobData>): Promise<BirthdayChannel | null> {
+  async process(
+    job: Job<BirthdayJobData | UserBirthdayTriggeredJobData>,
+  ): Promise<BirthdayChannel | number | null> {
     const context = `${UserBirthdayConsumer.name}.${this.process.name}`;
+    // Step 8.1: shared-user names a user with a birthday tomorrow; this side
+    // grants the rewards and fans the greeting out to the channel jobs below.
+    if (job.name === USER_BIRTHDAY_TRIGGERED_JOB) {
+      return this.handleBirthdayTriggered(
+        job.data as UserBirthdayTriggeredJobData,
+      );
+    }
+    const data = job.data as BirthdayJobData;
     let accepted = false;
     let channel: BirthdayChannel | null = null;
 
     switch (job.name) {
       case SEND_BIRTHDAY_MULTI_CHANNEL_JOB:
         channel = BirthdayChannel.MULTI_CHANNEL;
-        accepted = await this.sendBirthdayMultiChannel(job.data);
+        accepted = await this.sendBirthdayMultiChannel(data);
         break;
       case SEND_BIRTHDAY_EMAIL_JOB:
         channel = BirthdayChannel.EMAIL;
-        accepted = await this.sendBirthdayEmail(job.data);
+        accepted = await this.sendBirthdayEmail(data);
         break;
       default:
         return null;
     }
 
     this.logger.log(
-      `Birthday greeting for user ${job.data.slug} on channel ${channel}: accepted=${accepted}`,
+      `Birthday greeting for user ${data.slug} on channel ${channel}: accepted=${accepted}`,
       context,
     );
     return accepted ? channel : null;
+  }
+
+  /**
+   * One `user-birthday-triggered` job of shared-user (QD13): what the daily
+   * BirthdayStrategyScheduler of trend did for each user up to step 8.0.
+   * - The user is looked up here by sharedUserId. A user trend does not know
+   *   (a customer of another service) is skipped: no local row is created for
+   *   a greeting.
+   * - Identity (phone number, email, name) comes from shared-user, never from
+   *   the job or the local row.
+   * - shared-user not answering => throw: BullMQ retries the job (3 attempts,
+   *   set by the producer). Granting and claiming are idempotent, so a retry
+   *   does not grant or greet twice.
+   * @returns the number of campaigns the user was greeted for.
+   */
+  private async handleBirthdayTriggered(
+    data: UserBirthdayTriggeredJobData,
+  ): Promise<number> {
+    const context = `${UserBirthdayConsumer.name}.${this.handleBirthdayTriggered.name}`;
+    const campaigns =
+      await this.campaignService.getAvailableBirthdayCampaigns();
+    if (campaigns.length === 0) {
+      this.logger.log(
+        `No available ${CampaignType.USER_BIRTHDAY} campaign, skipping birthday of shared user ${data.sharedUserId}`,
+        context,
+      );
+      return 0;
+    }
+
+    const user = await this.userRepository.findOne({
+      where: { sharedUserId: data.sharedUserId },
+    });
+    if (!user) {
+      this.logger.log(
+        `Shared user ${data.sharedUserId} has no profile in trend, skipping birthday`,
+        context,
+      );
+      return 0;
+    }
+
+    const identities = await batchLookupSharedUserIdentities(
+      [user.sharedUserId],
+      this.sharedUserServiceClient,
+      this.logger,
+      context,
+    );
+    const identity = identities.get(user.sharedUserId);
+    if (!identity) {
+      this.logger.warn(
+        `User ${user.id} (${user.slug}) has no shared-user identity (sharedUserId=${user.sharedUserId}), skip birthday`,
+        context,
+      );
+      return 0;
+    }
+
+    // Grant the reward of every open USER_BIRTHDAY campaign (creates the
+    // CampaignRecipient when missing) before greeting.
+    await this.campaignService.triggerForUser(
+      user,
+      CampaignType.USER_BIRTHDAY,
+      identities,
+    );
+
+    let greeted = 0;
+    for (const campaign of campaigns) {
+      // Greet valid recipients only, once per campaign and year: claim the
+      // greeting before fanning out, so a retried job enqueues nothing.
+      const recipient = await this.campaignService.findBirthdayRecipient(
+        campaign.id,
+        user.id,
+        data.year,
+      );
+      if (!recipient) {
+        this.logger.warn(
+          `User ${user.slug} is not a valid birthday recipient for campaign ${campaign.slug} in ${data.year}, skip`,
+          context,
+        );
+        continue;
+      }
+      const claimed = await this.campaignService.claimBirthdayGreeting(
+        recipient.id,
+      );
+      if (!claimed) {
+        this.logger.warn(
+          `User ${user.slug} already greeted for campaign ${campaign.slug} in ${data.year}, skip`,
+          context,
+        );
+        continue;
+      }
+      await this.userBirthdayProducer.enqueueUser(user, campaign, identity);
+      greeted += 1;
+    }
+
+    this.logger.log(
+      `Birthday of user ${user.slug} (${data.birthdayDM}/${data.year}): greeted for ${greeted} campaign(s)`,
+      context,
+    );
+    return greeted;
   }
 
   /**

@@ -42,31 +42,30 @@ import { HasRoles } from 'src/role/roles.decorator';
 import { RoleEnum } from 'src/role/role.enum';
 import { CurrentUser } from './user.decorator';
 import { AuthProfileResponseDto } from 'src/auth/auth.dto';
-import { UserScheduler } from './user.scheduler';
 
 @Controller('user')
 @ApiTags('User')
 @ApiBearerAuth()
 export class UserController {
-  constructor(
-    private readonly userService: UserService,
-    private readonly userScheduler: UserScheduler,
-  ) {}
+  constructor(private readonly userService: UserService) {}
 
   @Post('birthday/trigger')
   @HasRoles(RoleEnum.Admin, RoleEnum.SuperAdmin)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Manually run the birthday greeting scheduler (for testing)',
+    summary:
+      'Manually run the birthday producer of shared-user (for testing); greetings follow asynchronously',
   })
   @ApiResponse({
     status: HttpStatus.OK,
     description: 'Birthday greeting scheduler has been triggered successfully',
   })
   async triggerBirthdayScheduler(): Promise<AppResponseDto<void>> {
-    await this.userScheduler.BirthdayStrategyScheduler();
+    // Step 8.1: the scheduler lives in shared-user (QD13); greetings are sent
+    // by UserBirthdayConsumer once the jobs arrive.
+    const message = await this.userService.triggerBirthdayProducer();
     return {
-      message: 'Birthday greeting scheduler has been triggered successfully',
+      message,
       statusCode: HttpStatus.OK,
       timestamp: new Date().toISOString(),
     } as AppResponseDto<void>;
